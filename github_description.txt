@@ -1,1 +1,0 @@
-An ESP32-based RC car control system with PS5 controller integration, a unique 'Rewind' feature, and a 'Shadow Stack' fail-safe for autonomous return-to-home upon disconnection. Focuses on embedded systems, hardware-software interaction, and robust control.
