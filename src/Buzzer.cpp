@@ -1,22 +1,45 @@
-#include <Buzzer.h>
-#include <Config.h>
+#include <Arduino.h>
+#include "Config.h"
+#include "Buzzer.h"
+
+// Use LEDC Channel 7 for the buzzer to avoid clashing with ESP32Servo (which uses channels 0-3)
+#define BUZZER_CHANNEL 7 
+
+void initBuzzer() {
+    pinMode(BUZZER_PIN, OUTPUT);
+    // Attach buzzer pin to LEDC channel 7 with a 2000Hz base frequency
+    ledcSetup(BUZZER_CHANNEL, 2000, 8); 
+    ledcAttachPin(BUZZER_PIN, BUZZER_CHANNEL);
+}
+
+void playTone(int frequency, int duration) {
+    if (frequency == 0) {
+        ledcWrite(BUZZER_CHANNEL, 0); // Turn off sound (Duty cycle 0)
+    } else {
+        ledcSetup(BUZZER_CHANNEL, frequency, 8);
+        ledcWrite(BUZZER_CHANNEL, 127); // 50% duty cycle
+    }
+    delay(duration);
+    ledcWrite(BUZZER_CHANNEL, 0); // Stop sound after duration
+}
 
 void playConnectSound() {
-    tone(BUZZER_PIN, 523, 80); delay(90);
-    tone(BUZZER_PIN, 659, 80); delay(90);
-    tone(BUZZER_PIN, 784, 100); delay(100);
-    noTone(BUZZER_PIN);
+    initBuzzer();
+    playTone(1000, 100);
+    delay(50);
+    playTone(1500, 150);
 }
 
 void playDisconnectSound() {
-    tone(BUZZER_PIN, 784, 100); delay(110);
-    tone(BUZZER_PIN, 523, 150); delay(150);
-    noTone(BUZZER_PIN);
+    initBuzzer();
+    playTone(1200, 150);
+    delay(50);
+    playTone(600, 300);
 }
 
 void playRewindSound() {
-    // צפצוף מהיר ללא השהיות מיותרות במערכת
-    tone(BUZZER_PIN, 1400, 40); delay(45);
-    tone(BUZZER_PIN, 1800, 40); delay(45);
-    noTone(BUZZER_PIN);
+    initBuzzer();
+    playTone(800, 80);
+    delay(30);
+    playTone(1200, 80);
 }

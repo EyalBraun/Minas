@@ -2,16 +2,22 @@
 
 RewindManager::RewindManager(Servo& steerServo, Servo& throttleESC) 
     : _steerServo(steerServo), _throttleESC(throttleESC) {
-    
-    // הקצאת זיכרון מפורשת מ-PSRAM עם בדיקת תקינות
+    // Leave constructor clean; allocation moved to begin()
+}
+
+void RewindManager::begin() {
+    Serial.println("[RewindManager] Initializing Shadow Stack in PSRAM...");
     _shadowStack = (CarState*)ps_malloc(MAX_SHADOW_STEPS * sizeof(CarState));
+    
     if (_shadowStack == nullptr) {
-        Serial.println("[CRITICAL ERROR] PSRAM Allocation Failed for Shadow Stack!");
+        Serial.println("[CRITICAL ERROR] PSRAM Allocation Failed! Check platformio.ini PSRAM flags.");
+    } else {
+        Serial.printf("[SUCCESS] Shadow Stack allocated successfully in PSRAM (%d steps).\n", MAX_SHADOW_STEPS);
     }
 }
 
 void RewindManager::record(int steer, int throttle) {
-    if (_isRewinding) return;
+    if (_isRewinding || _shadowStack == nullptr) return;
 
     unsigned long now = millis();
 
@@ -21,11 +27,9 @@ void RewindManager::record(int steer, int throttle) {
     if (_count < MAX_HISTORY_STEPS) _count++;
 
     // 2. Record to Shadow Stack (Circular Buffer)
-    if (_shadowStack != nullptr) {
-        _shadowStack[_shadowHead] = {steer, throttle, now};
-        _shadowHead = (_shadowHead + 1) % MAX_SHADOW_STEPS;
-        if (_shadowCount < MAX_SHADOW_STEPS) _shadowCount++;
-    }
+    _shadowStack[_shadowHead] = {steer, throttle, now};
+    _shadowHead = (_shadowHead + 1) % MAX_SHADOW_STEPS;
+    if (_shadowCount < MAX_SHADOW_STEPS) _shadowCount++;
 }
 
 void RewindManager::startStandardRewind() {
@@ -34,7 +38,6 @@ void RewindManager::startStandardRewind() {
 
     Serial.println("[Minas] Standard Rewind Initiated...");
 
-    // Double-Pump קצר ל-ESC כדי לשחרר נעילת בילום ברוורס
     _throttleESC.write(90); delay(50);
     _throttleESC.write(60); delay(50);
     _throttleESC.write(90); delay(50);
@@ -43,7 +46,6 @@ void RewindManager::startStandardRewind() {
         CarState* current = getState(i);
         CarState* prev = getState(i + 1);
 
-        // היפוך מצערת: 90 הוא ניוטרל, 180-throttle הופך קדימה לרוורס
         int invertedThrottle = 180 - current->throttle;
 
         _steerServo.write(current->steer);
@@ -59,17 +61,30 @@ void RewindManager::startStandardRewind() {
 }
 
 void RewindManager::returnToHome() {
-    if (_shadowCount < 2 || _isRewinding || _shadowStack == nullptr) return;
-    _isRewinding = true;
+    Serial.println("[DEBUG] returnToHome() triggered.");
+    Serial.printf("[DEBUG] _shadowCount = %d, _isRewinding = %d, _shadowStack = %p\n", 
+                  _shadowCount, _isRewinding, (void*)_shadowStack);
 
+    if (_shadowStack == nullptr) {
+        Serial.println("[ERROR] Return to Home failed: Shadow stack pointer is NULL.");
+        return;
+    }
+    if (_isRewinding) {
+        Serial.println("[WARNING] Return to Home skipped: Already rewinding.");
+        return;
+    }
+    if (_shadowCount < 2) {
+        Serial.println("[WARNING] Return to Home failed: Not enough history recorded yet (_shadowCount < 2). Drive around first!");
+        return;
+    }
+
+    _isRewinding = true;
     Serial.println("[FAIL-SAFE] Shadow Stack Triggered: Returning to Home...");
 
-    // Double-Pump קצר ל-ESC
     _throttleESC.write(90); delay(50);
     _throttleESC.write(60); delay(50);
     _throttleESC.write(90); delay(50);
 
-    // קריאה אחורה מתוך חוצץ מעגלי
     for (int i = 0; i < _shadowCount - 1; i++) {
         int currIdx = (_shadowHead - 1 - i + MAX_SHADOW_STEPS) % MAX_SHADOW_STEPS;
         int prevIdx = (_shadowHead - 2 - i + MAX_SHADOW_STEPS) % MAX_SHADOW_STEPS;
@@ -85,12 +100,13 @@ void RewindManager::returnToHome() {
         unsigned long delta = current->time - prev->time;
         if (delta > 500) delta = RECORD_INTERVAL_MS;
         
-        delay(delta / 2); // חזרה במהירות כפולה
+        delay(delta / 2); 
     }
 
     _shadowCount = 0;
     _shadowHead = 0;
     _isRewinding = false;
+    Serial.println("[FAIL-SAFE] Return to Home complete.");
 }
 
 CarState* RewindManager::getState(int offset) {
