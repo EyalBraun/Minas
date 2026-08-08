@@ -1,154 +1,112 @@
-/**
- * @file main.cpp
- * @project Minas (ChronosDrive Pro)
- * @brief Features MAC Address Verification, Shadow Stack (Return to Home) Fail-safe, and Audio Feedback.
- * 
- * This system controls an RC car using a PS5 controller via Bluetooth.
- * It includes a custom "Rewind" feature (like in racing games) and a failsafe
- * that automatically backtracks the car if the controller loses connection.
- */
-
 #include <Arduino.h>
 #include <ps5Controller.h>
 #include <ESP32Servo.h>
 #include "Config.h"
 #include "RewindManager.h"
-#include "Buzzer.h" 
+#include "Buzzer.h"
+#include "DataLogger.h"
 
-// --- GLOBAL OBJECTS ---
-Servo steeringServo;      // Controls the front steering mechanism
-Servo throttleESC;        // Controls the Electronic Speed Controller (Motor)
-RewindManager chronos(steeringServo, throttleESC); // Custom class handling history and playback
+Servo steeringServo;
+Servo throttleESC;
+RewindManager chronos(steeringServo, throttleESC);
+DataLogger logger;
 
-// --- STATE TRACKING VARIABLES ---
-unsigned long lastRecordTime = 0; // Tracks the last time a movement was saved to history
-bool wasConnected = false;        // Tracks previous connection state
-bool isLoggingPaused = false;     // Controls whether logging/recording is active
-unsigned long lastMuteBeepTime = 0; // Tracks interval for warning beeps when logging is paused
+unsigned long lastRecordTime = 0;
+unsigned long lastStatusBeepTime = 0;
+bool wasConnected = false;
 
 void setup() {
     Serial.begin(115200);
-    delay(1000);
-
-    /**
-     * @brief CRITICAL: Initialize Shadow Stack in PSRAM
-     * This allocates the memory buffer required for tracking and replaying history.
-     */
     chronos.begin();
+    logger.begin();
 
-    /**
-     * @brief MAC Address Enforcement
-     * The PS5 library uses this MAC to listen for a specific controller.
-     */
     if (!ps5.begin(PS5_CONTROLLER_MAC)) {
-        Serial.println("Failed to initialize PS5 Library with specified MAC.");
+        Serial.println("PS5 Init Failed");
     }
 
-    /**
-     * @brief Hardware Timer Allocation
-     * Explicitly allocating all 4 timers locks them for the Servo/ESC, 
-     * preventing the buzzer tone functions from hijacking the steering channel.
-     */
     ESP32PWM::allocateTimer(0);
     ESP32PWM::allocateTimer(1);
     ESP32PWM::allocateTimer(2);
     ESP32PWM::allocateTimer(3);
-    
-    // Configure and attach Steering Servo
-    steeringServo.setPeriodHertz(50);
-    steeringServo.attach(SERVO_PIN, SERVO_MIN_PULSE, SERVO_MAX_PULSE);
-    
-    // Configure and attach ESC
-    throttleESC.setPeriodHertz(50);
-    throttleESC.attach(ESC_PIN, ESC_MIN_PULSE, ESC_MAX_PULSE);
 
-    // Initialize Buzzer with dedicated LEDC channel
+    steeringServo.attach(SERVO_PIN, SERVO_MIN_PULSE, SERVO_MAX_PULSE);
+    throttleESC.attach(ESC_PIN, ESC_MIN_PULSE, ESC_MAX_PULSE);
     initBuzzer();
 
-    // Arm the ESC with a neutral signal
     throttleESC.write(90);
-    delay(2000); 
-    
-    Serial.println("Minas Ready. Waiting for connection...");
+    delay(2000);
 }
 
-/**
- * @brief Reads controller inputs, applies them to the car, and records them to history.
- */
 void handleInput() {
     int steerAngle = map(ps5.LStickX(), -128, 127, 0, 180);
-    int throttleValue = map(ps5.RStickY(), -128, 127, 180, 0); 
+    int throttleValue = map(ps5.RStickY(), -128, 127, 180, 0);
 
     steeringServo.write(steerAngle);
     throttleESC.write(throttleValue);
 
-    // Save the current state to the Rewind history buffer ONLY if logging is not paused
-    if (!isLoggingPaused) {
-        if (millis() - lastRecordTime >= RECORD_INTERVAL_MS) {
-            chronos.record(steerAngle, throttleValue);
-            lastRecordTime = millis();
+    // 1. Toggle Owner/Guest mode with Circle button (User's "B")
+    static bool circlePressed = false;
+    if (ps5.Circle()) {
+        if (!circlePressed) {
+            bool currentMode = logger.isOwnerMode();
+            logger.setOwnerMode(!currentMode);
+            Serial.printf("Mode Changed: %s\n", !currentMode ? "OWNER" : "GUEST");
+            circlePressed = true;
         }
+    } else {
+        circlePressed = false;
+    }
+
+    // 2. Trigger Manual Rewind with Triangle button
+    static bool trianglePressed = false;
+    if (ps5.Triangle()) {
+        if (!trianglePressed) {
+            playRewindSound();
+            chronos.startStandardRewind();
+            trianglePressed = true;
+        }
+    } else {
+        trianglePressed = false;
+    }
+
+    // 3. Periodic sampling for ML features
+    if (millis() - lastRecordTime >= RECORD_INTERVAL_MS) {
+        chronos.record(steerAngle, throttleValue);
+        logger.sample(steerAngle, throttleValue);
+        lastRecordTime = millis();
     }
 }
 
 void loop() {
     bool isConnectedNow = ps5.isConnected();
 
-    // --- 1. STATE CHANGE DETECTION (Edge Detection) ---
     if (isConnectedNow && !wasConnected) {
-        Serial.println("Controller Connected!");
-        playConnectSound(); 
-        wasConnected = true; 
-    } 
-    else if (!isConnectedNow && wasConnected) {
-        Serial.println("Connection Lost! Initiating Return to Home...");
-        playDisconnectSound(); 
-        
-        // Trigger Shadow Stack Return to Home fail-safe
-        chronos.returnToHome(); 
-        wasConnected = false; 
+        playConnectSound();
+        logger.logConnect();
+        wasConnected = true;
+    } else if (!isConnectedNow && wasConnected) {
+        playDisconnectSound();
+        logger.logDisconnect();
+        wasConnected = false;
     }
 
-    // --- 2. NORMAL OPERATION ---
     if (isConnectedNow) {
+        handleInput();
         
-        // Toggle logging/recording mode with Cross (X) button
-        static bool crossWasPressed = false;
-        if (ps5.Cross()) {
-            if (!crossWasPressed) {
-                isLoggingPaused = !isLoggingPaused;
-                crossWasPressed = true;
-                Serial.println(isLoggingPaused ? "[Minas] Logging PAUSED." : "[Minas] Logging RESUMED.");
-                playMuteWarningSound();
+        // Periodic status beep every few seconds
+        if (millis() - lastStatusBeepTime >= BEEP_INTERVAL_MS) {
+            if (logger.isOwnerMode()) {
+                playOwnerModeBeep();
+            } else {
+                playGuestModeBeep();
             }
-        } else {
-            crossWasPressed = false;
+            lastStatusBeepTime = millis();
         }
-
-        // Check for manual Rewind trigger (Triangle button)
-        if (ps5.Triangle()) {
-            playRewindSound();            
-            chronos.startStandardRewind(); // Execute reverse playback
-        } else {
-            handleInput();                
-        }
-
-        // If logging is paused, beep every 3 seconds to remind the driver
-        if (isLoggingPaused) {
-            if (millis() - lastMuteBeepTime >= 3000) {
-                playMuteWarningSound();
-                lastMuteBeepTime = millis();
-            }
-        }
-        
-        ps5.setLed(0, 255, 0); 
-        ps5.sendToController();
-        
     } else {
-        // --- 3. SAFETY IDLE ---
-        steeringServo.write(90);
-        throttleESC.write(90);
+        // Shadow Stack Return-to-Home logic (Fail-safe)
+        // Fixed: Use returnToHome() instead of update()
+        chronos.returnToHome();
     }
-    
-    delay(5);
+
+    logger.update(LOG_INTERVAL_MS);
 }

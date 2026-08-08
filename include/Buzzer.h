@@ -9,4 +9,8 @@ void playDisconnectSound();
 void playRewindSound();
 void playMuteWarningSound();
 
+// New status sounds
+void playOwnerModeBeep();
+void playGuestModeBeep();
+
 #endif

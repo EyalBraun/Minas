@@ -8,17 +8,27 @@
 class DataLogger {
 private:
     bool _initialized;
+    bool _isOwnerMode;
     unsigned long _lastLogTime;
     String _currentFileName;
 
+    // Feature accumulation
     float _steerSum, _throttleSum, _steerSqSum, _throttleSqSum;
-    int _sampleCount, _rewindCount, _disconnectCount, _connectCount;
+    float _lastSteer, _lastThrottle;
+    float _jerkSum;
+    int _sampleCount;
+    
+    // System events
+    int _rewindCount, _disconnectCount, _connectCount;
 
     void createNewLogFile();
 
 public:
-    DataLogger(); // No CS pin needed for the built-in SDMMC slot
+    DataLogger();
     bool begin();
+    void setOwnerMode(bool isOwner);
+    bool isOwnerMode() const { return _isOwnerMode; }
+    
     void sample(int steer, int throttle);
     void logRewind();
     void logDisconnect();
