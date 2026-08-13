@@ -11,7 +11,7 @@ DataLogger::DataLogger() : _initialized(false), _isOwnerMode(true), _lastLogTime
     _lastSteer = _lastThrottle = 90; // Neutral start
     _jerkSum = 0;
     _sampleCount = 0;
-    _rewindCount = _disconnectCount = _connectCount = 0;
+    _disconnectCount = _connectCount = 0;
 }
 
 bool DataLogger::begin() {
@@ -33,7 +33,8 @@ void DataLogger::createNewLogFile() {
     _currentFileName = "/log_" + String(millis() / 1000) + ".csv";
     File file = SD_MMC.open(_currentFileName, FILE_WRITE);
     if (file) {
-        file.println("Timestamp,IsOwner,AvgSteer,StdDevSteer,AvgThrottle,StdDevThrottle,EstSpeed,AvgJerk,Rewinds,Disconnects");
+        // CSV schema contains only current telemetry and disconnect count.
+        file.println("Timestamp,IsOwner,AvgSteer,StdDevSteer,AvgThrottle,StdDevThrottle,EstSpeed,AvgJerk,Disconnects");
         file.close();
     }
 }
@@ -52,7 +53,6 @@ void DataLogger::sample(int steer, int throttle) {
     _sampleCount++;
 }
 
-void DataLogger::logRewind() { _rewindCount++; }
 void DataLogger::logDisconnect() { _disconnectCount++; }
 void DataLogger::logConnect() { _connectCount++; }
 
@@ -69,22 +69,20 @@ void DataLogger::update(unsigned long intervalMs) {
         float avgJerk = _jerkSum / _sampleCount;
         
         // Speed estimation: based on throttle intensity and friction
-        // Assuming 90 is neutral, 180 is max forward, 0 is max reverse
         float throttleIntensity = abs(avgThrottle - 90) / 90.0;
         float estimatedSpeed = throttleIntensity * 100.0 * FRICTION_COEFFICIENT;
 
         File file = SD_MMC.open(_currentFileName, FILE_APPEND);
         if (file) {
-            file.printf("%lu,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d\n", 
+            file.printf("%lu,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d\n",
                 now, _isOwnerMode ? 1 : 0, avgSteer, sqrt(max(0.0f, steerVar)), 
                 avgThrottle, sqrt(max(0.0f, throttleVar)), estimatedSpeed, avgJerk,
-                _rewindCount, _disconnectCount);
+                _disconnectCount);
             file.close();
         }
 
         // Reset accumulators
         _steerSum = _throttleSum = _steerSqSum = _throttleSqSum = _jerkSum = 0;
         _sampleCount = 0;
-        _rewindCount = 0; // Reset event counters per log interval if desired
     }
 }

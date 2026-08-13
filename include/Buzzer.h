@@ -6,10 +6,10 @@
 void initBuzzer();
 void playConnectSound();
 void playDisconnectSound();
-void playRewindSound();
+void playObstacleSound();
 void playMuteWarningSound();
 
-// New status sounds
+// Status sounds
 void playOwnerModeBeep();
 void playGuestModeBeep();
 

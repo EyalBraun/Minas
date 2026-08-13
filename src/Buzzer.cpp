@@ -32,9 +32,10 @@ void playDisconnectSound() {
     playTone(523, 150);
 }
 
-void playRewindSound() {
-    playTone(1400, 40); delay(20);
-    playTone(1800, 40);
+void playObstacleSound() {
+    // Rapid urgent beeps when obstacle detected (< 30cm)
+    playTone(2200, 80);
+    delay(50);
 }
 
 void playMuteWarningSound() {
@@ -43,12 +44,10 @@ void playMuteWarningSound() {
 
 // Periodic status sounds
 void playOwnerModeBeep() {
-    // Single short high beep for Owner
     playTone(2500, 50);
 }
 
 void playGuestModeBeep() {
-    // Double low beep for Guest/Not-Me
     playTone(1000, 50); delay(100);
     playTone(1000, 50);
 }

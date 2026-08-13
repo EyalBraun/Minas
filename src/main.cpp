@@ -2,22 +2,51 @@
 #include <ps5Controller.h>
 #include <ESP32Servo.h>
 #include "Config.h"
-#include "RewindManager.h"
 #include "Buzzer.h"
 #include "DataLogger.h"
 
 Servo steeringServo;
 Servo throttleESC;
-RewindManager chronos(steeringServo, throttleESC);
 DataLogger logger;
 
 unsigned long lastRecordTime = 0;
 unsigned long lastStatusBeepTime = 0;
+unsigned long lastSonarCheckTime = 0;
+unsigned long lastObstacleBeepTime = 0;
 bool wasConnected = false;
+int frontDistanceCm = 999;
+
+int getSonarDistanceCM() {
+    digitalWrite(SONAR_TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(SONAR_TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(SONAR_TRIG_PIN, LOW);
+
+    const unsigned long duration = pulseIn(SONAR_ECHO_PIN, HIGH, SONAR_TIMEOUT_US);
+    if (duration == 0) {
+        return 999; // No echo: obstacle is out of the selected measurement range.
+    }
+
+    return static_cast<int>((duration * 0.0343f) / 2.0f);
+}
+
+void updateFrontSonar() {
+    if (millis() - lastSonarCheckTime < SONAR_INTERVAL_MS) {
+        return;
+    }
+
+    lastSonarCheckTime = millis();
+    frontDistanceCm = getSonarDistanceCM();
+}
 
 void setup() {
     Serial.begin(115200);
-    chronos.begin();
+
+    pinMode(SONAR_TRIG_PIN, OUTPUT);
+    pinMode(SONAR_ECHO_PIN, INPUT);
+    digitalWrite(SONAR_TRIG_PIN, LOW);
+
     logger.begin();
 
     if (!ps5.begin(PS5_CONTROLLER_MAC)) {
@@ -33,22 +62,40 @@ void setup() {
     throttleESC.attach(ESC_PIN, ESC_MIN_PULSE, ESC_MAX_PULSE);
     initBuzzer();
 
-    throttleESC.write(90);
+    // Keep the ESC at neutral while it initializes.
+    throttleESC.write(ESC_NEUTRAL_ANGLE);
     delay(2000);
 }
 
 void handleInput() {
-    int steerAngle = map(ps5.LStickX(), -128, 127, 0, 180);
+    const int steerAngle = map(ps5.LStickX(), -128, 127, 0, 180);
     int throttleValue = map(ps5.RStickY(), -128, 127, 180, 0);
+
+    updateFrontSonar();
+
+    // A front sensor must block forward movement, but reverse remains available
+    // so the car can move away from the detected obstacle.
+    const bool isForwardCommand = throttleValue > ESC_NEUTRAL_ANGLE;
+    const bool obstacleTooClose = frontDistanceCm <= OBSTACLE_DISTANCE_CM;
+    if (isForwardCommand && obstacleTooClose) {
+        throttleValue = ESC_NEUTRAL_ANGLE;
+
+        if (millis() - lastObstacleBeepTime >= OBSTACLE_BEEP_INTERVAL_MS) {
+            playObstacleSound();
+            lastObstacleBeepTime = millis();
+        }
+
+        Serial.printf("[SAFETY] Front obstacle at %d cm. Forward motion blocked.\n", frontDistanceCm);
+    }
 
     steeringServo.write(steerAngle);
     throttleESC.write(throttleValue);
 
-    // 1. Toggle Owner/Guest mode with Circle button (User's "B")
+    // Toggle Owner/Guest mode with the Circle button.
     static bool circlePressed = false;
     if (ps5.Circle()) {
         if (!circlePressed) {
-            bool currentMode = logger.isOwnerMode();
+            const bool currentMode = logger.isOwnerMode();
             logger.setOwnerMode(!currentMode);
             Serial.printf("Mode Changed: %s\n", !currentMode ? "OWNER" : "GUEST");
             circlePressed = true;
@@ -57,28 +104,20 @@ void handleInput() {
         circlePressed = false;
     }
 
-    // 2. Trigger Manual Rewind with Triangle button
-    static bool trianglePressed = false;
-    if (ps5.Triangle()) {
-        if (!trianglePressed) {
-            playRewindSound();
-            chronos.startStandardRewind();
-            trianglePressed = true;
-        }
-    } else {
-        trianglePressed = false;
+    // The Cross (X) button deliberately has no action and must not add a log sample.
+    const bool suppressLogWhileCrossPressed = ps5.Cross();
+    if (suppressLogWhileCrossPressed) {
+        // Intentionally empty.
     }
 
-    // 3. Periodic sampling for ML features
-    if (millis() - lastRecordTime >= RECORD_INTERVAL_MS) {
-        chronos.record(steerAngle, throttleValue);
+    if (!suppressLogWhileCrossPressed && millis() - lastRecordTime >= RECORD_INTERVAL_MS) {
         logger.sample(steerAngle, throttleValue);
         lastRecordTime = millis();
     }
 }
 
 void loop() {
-    bool isConnectedNow = ps5.isConnected();
+    const bool isConnectedNow = ps5.isConnected();
 
     if (isConnectedNow && !wasConnected) {
         playConnectSound();
@@ -92,8 +131,7 @@ void loop() {
 
     if (isConnectedNow) {
         handleInput();
-        
-        // Periodic status beep every few seconds
+
         if (millis() - lastStatusBeepTime >= BEEP_INTERVAL_MS) {
             if (logger.isOwnerMode()) {
                 playOwnerModeBeep();
@@ -103,9 +141,9 @@ void loop() {
             lastStatusBeepTime = millis();
         }
     } else {
-        // Shadow Stack Return-to-Home logic (Fail-safe)
-        // Fixed: Use returnToHome() instead of update()
-        chronos.returnToHome();
+        // Bluetooth fail-safe: stop in place; no rewind or return-to-home action.
+        steeringServo.write(ESC_NEUTRAL_ANGLE);
+        throttleESC.write(ESC_NEUTRAL_ANGLE);
     }
 
     logger.update(LOG_INTERVAL_MS);
