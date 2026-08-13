@@ -1,16 +1,13 @@
 #ifndef BUZZER_H
 #define BUZZER_H
 
-#include <Arduino.h>
-
 void initBuzzer();
+void playTone(int frequency, int durationMs);
 void playConnectSound();
 void playDisconnectSound();
 void playObstacleSound();
-void playMuteWarningSound();
-
-// Status sounds
 void playOwnerModeBeep();
 void playGuestModeBeep();
+void playBatteryCriticalSound();
 
 #endif

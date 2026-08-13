@@ -1,99 +1,64 @@
-# Minas - High-Performance Autonomous RC Control System
+# MinasDT (Data Transmitter)
 
-Minas is a sophisticated ESP32-based control framework for RC vehicles. It bridges the gap between manual remote control and autonomous safety systems by integrating a **PS5 DualSense Controller** with a custom-built **Shadow Stack Fail-safe** and a gaming-inspired **Rewind** mechanism.
-
-Developed with a "First Principles" engineering approach, Minas prioritizes low-latency response, robust hardware resource management, and automated recovery.
+**Author:** Eyal Braun & Manus AI**Project:** Minas - Autonomous RC Car Telemetry & Security System
 
 ---
 
-## 🛠 Core Features
+## 1. Overview
 
-### 🎮 PS5 Controller Integration
-
-Seamless Bluetooth connectivity using the DualSense controller. Minas maps joystick inputs to high-precision PWM signals for steering servos and Electronic Speed Controllers (ESCs), providing a professional-grade driving experience.
-
-### ⏪ Chronos Rewind System
-
-A real-time history buffer that records every movement. At the press of a button (Triangle), the system executes a precise reverse-playback of the last 3 seconds of driving, allowing for instant correction of maneuvers.
-
-### 🛡 Shadow Stack (Return to Home)
-
-The ultimate fail-safe. Minas utilizes the **PSRAM** on the ESP32 Wrover to maintain a massive circular buffer of the entire journey (up to 100 seconds).
-
-- **Automatic Trigger:** If the Bluetooth signal drops or the controller goes out of range, the system immediately takes over.
-
-- **Autonomous Backtracking:** The car autonomously retraces its exact path in reverse to return to the last known point of successful connection.
-
-### 🔊 Intelligent Audio & Visual Feedback
-
-- **Buzzer Cues:** Distinct auditory signatures for connection, disconnection, and system triggers.
-
-- **Lightbar Sync:** The PS5 controller lightbar changes color dynamically to reflect system states (e.g., Green for active connection).
-
-### ⚙️ Hardware Resource Management
-
-Minas implements explicit **Hardware Timer Allocation**. By locking ESP32 internal timers for PWM generation, it prevents interference between the buzzer's `tone()` function and the servo signals, ensuring zero-jitter steering even during audio alerts.
+**MinasDT** is the firmware for the Minas RC car. It runs on an ESP32-S3 and handles real-time control via a PS5 controller, obstacle avoidance using ultrasonic sensors, and professional-grade battery safety monitoring. Instead of logging data locally, it broadcasts real-time telemetry to the **MinasDR** base station using the **ESP-NOW** protocol.
 
 ---
 
-## 🏗 Hardware Requirements
+## 2. Key Features
 
-- **MCU:** ESP32 Wrover (Required for PSRAM support).
+- **ESP-NOW Telemetry:** Streams driving data (steering, throttle, sonar) wirelessly to a receiver.
 
-- **Input:** PS5 DualSense Controller.
+- **Battery Guardian:** Continuously monitors 2S LiPo voltage. If the voltage drops below **6.8V**, the car immediately shuts down the motor and emits a high-pitched siren to prevent battery damage.
 
-- **Drive:** Standard RC Steering Servo & ESC (Electronic Speed Controller).
+- **Obstacle Avoidance:** Automatically blocks forward movement if an object is detected within 30cm.
 
-- **Audio:** Passive Buzzer (Connected to PWM-capable pin).
-
----
-
-## 💻 Software Stack
-
-Built on **PlatformIO**, utilizing the following core dependencies:
-
-- `ps5-esp32`: High-performance Bluetooth stack for controller interfacing.
-
-- `ESP32Servo`: Optimized PWM control for actuators.
+- **Dual Driver Modes:** Supports "Owner" and "Guest" modes (toggled via the Circle button) for training driver-recognition Machine Learning models.
 
 ---
 
-## 🚀 Getting Started
+## 3. Hardware Configuration
 
-### 1. Installation
+### **Pinout Table**
 
-```bash
-git clone https://github.com/EyalBraun/Minas.git
-```
-
-### 2. Configuration
-
-Open `include/Config.h` and update your controller's hardware address:
-
-```cpp
-#define PS5_CONTROLLER_MAC "XX:XX:XX:XX:XX:XX" // Your Controller MAC
-```
-
-### 3. Deployment
-
-1. Open the project in VS Code with **PlatformIO**.
-
-1. Connect your ESP32 Wrover.
-
-1. Click **Build and Upload**.
+| Component | ESP32 Pin | Function |
+| --- | --- | --- |
+| **Steering Servo** | GPIO 25 | PWM Control |
+| **ESC (Motor)** | GPIO 26 | PWM Control |
+| **Buzzer** | GPIO 27 | Audio Feedback |
+| **Sonar Trig** | GPIO 22 | Ultrasonic Trigger |
+| **Sonar Echo** | GPIO 23 | Ultrasonic Echo |
+| **Battery Sense** | GPIO 34 | ADC Voltage Monitoring |
 
 ---
 
-## 🗺 Roadmap
+## 4. Setup Instructions
 
-- **Advanced PID Control:** Implementing closed-loop feedback for steering precision.
+1. **MAC Address:** Open `include/Config.h` and replace `receiverAddress` with the MAC address of your **MinasDR** receiver board.
 
-- **Sensor Fusion:** Integrating IMU (MPU6050 ) and Ultrasonic sensors for obstacle avoidance.
+1. **Voltage Divider:** Ensure you have a voltage divider (e.g., two 10k resistors) connected between the battery and GPIO 34 to safely step down the 7.4V-8.4V to 3.3V.
 
-- **RTOS Migration:** Moving to a fully multi-threaded FreeRTOS architecture to handle concurrent sensor processing.
+1. **Upload:** Use PlatformIO to compile and upload the code to your ESP32-S3.
 
 ---
 
-## 👨‍💻 Author
+## 5. Telemetry Schema
 
-**Eyal Braun***Independent Researcher | Systems Engineer*[GitHub Profile](https://github.com/EyalBraun)
+Data is sent in a binary struct for maximum speed:
+
+- `sequenceNumber`: Monotonic counter for packet loss detection.
+
+- `timestamp`: Milliseconds since boot.
+
+- `throttle`: Raw command (-100 to 100).
+
+- `steering`: Raw angle (0 to 180).
+
+- `sonarDistance`: Distance to front obstacle.
+
+- `packetLost`: Flag for receiver-side padding.

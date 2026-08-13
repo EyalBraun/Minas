@@ -1,6 +1,6 @@
 #include <Arduino.h>
-#include <Buzzer.h>
-#include <Config.h>
+#include "Buzzer.h"
+#include "Config.h"
 
 #define BUZZER_LEDC_CHANNEL 7
 
@@ -33,16 +33,9 @@ void playDisconnectSound() {
 }
 
 void playObstacleSound() {
-    // Rapid urgent beeps when obstacle detected (< 30cm)
     playTone(2200, 80);
-    delay(50);
 }
 
-void playMuteWarningSound() {
-    playTone(2000, 60);
-}
-
-// Periodic status sounds
 void playOwnerModeBeep() {
     playTone(2500, 50);
 }
@@ -50,4 +43,14 @@ void playOwnerModeBeep() {
 void playGuestModeBeep() {
     playTone(1000, 50); delay(100);
     playTone(1000, 50);
+}
+
+void playBatteryCriticalSound() {
+    // Very loud, piercing alternating sirens
+    for(int i=0; i<3; i++) {
+        playTone(3000, 200);
+        delay(100);
+        playTone(2000, 200);
+        delay(100);
+    }
 }
