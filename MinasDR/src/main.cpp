@@ -7,7 +7,7 @@
  */
 
 #include "../include/DataReceiver.h"
-
+#include <Arduino.h>
 DataReceiver receiver;
 
 void OnDataRecv(const uint8_t* mac, const uint8_t* incomingDataBytes, int len) {

@@ -3,6 +3,7 @@
 #include "Config.h"
 
 #define BUZZER_LEDC_CHANNEL 7
+#define BUZZER_PIN 27 // Assuming standard pin, update if different
 
 void initBuzzer() {
     ledcSetup(BUZZER_LEDC_CHANNEL, 2000, 8);
@@ -14,7 +15,8 @@ void playTone(int frequency, int durationMs) {
     if (frequency > 0) {
         ledcSetup(BUZZER_LEDC_CHANNEL, frequency, 8);
         ledcWrite(BUZZER_LEDC_CHANNEL, 127);
-    } else {
+    }
+    else {
         ledcWrite(BUZZER_LEDC_CHANNEL, 0);
     }
     delay(durationMs);
@@ -43,14 +45,4 @@ void playOwnerModeBeep() {
 void playGuestModeBeep() {
     playTone(1000, 50); delay(100);
     playTone(1000, 50);
-}
-
-void playBatteryCriticalSound() {
-    // Very loud, piercing alternating sirens
-    for(int i=0; i<3; i++) {
-        playTone(3000, 200);
-        delay(100);
-        playTone(2000, 200);
-        delay(100);
-    }
 }

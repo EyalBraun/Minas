@@ -8,6 +8,5 @@ void playDisconnectSound();
 void playObstacleSound();
 void playOwnerModeBeep();
 void playGuestModeBeep();
-void playBatteryCriticalSound();
 
 #endif
