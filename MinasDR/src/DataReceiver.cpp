@@ -1,24 +1,34 @@
 /**
  * ============================================================================
- * Project: MinasDR (Data Receiver) - MRP Secure Version
+ * Project: MinasDR (Data Receiver) - MRP v1.0 Hardened with ML Logging
  * File: DataReceiver.cpp
- * Description: Telemetry receiver with MRP decryption and isOwner logging.
+ * Description: Base station with KDF-based rotation and ML feature CSV logging.
  * ============================================================================
  */
 
 #include "../include/DataReceiver.h"
 #include "../../shared/MRP.h"
 
-MRPProtocol mrp; 
+MRPProtocol mrp;
 
+// --- Security State Variables ---
+static uint8_t em[AES_KEY_SIZE];
+static uint8_t en[AES_KEY_SIZE];
+static unsigned long lastValidMc = 0;
+static int failureCounter = 0;
 
-static uint8_t em[AES_KEY_SIZE] = { 0x01,0x23,0x45,0x67,0x89,0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89,0xAB,0xCD,0xEF };
-static uint8_t en[AES_KEY_SIZE] = { 0 };
+static uint8_t masterSeed[MASTER_SEED_SIZE] = {
+    0x4D, 0x49, 0x4E, 0x41, 0x5F, 0x53, 0x45, 0x43,
+    0x52, 0x45, 0x54, 0x5F, 0x53, 0x45, 0x45, 0x44,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10
+};
 
 DataReceiver::DataReceiver()
     : _initialized(false), _lastReceivedSeq(0), _totalLostPackets(0) {
     memset(&_lastData, 0, sizeof(_lastData));
-    memcpy(en, em, AES_KEY_SIZE);
+    mrp.deriveKey(masterSeed, 0, em);
+    mrp.deriveKey(masterSeed, 1, en);
 }
 
 bool DataReceiver::begin() {
@@ -37,7 +47,8 @@ void DataReceiver::checkAndCreateHeader() {
     if (!SD_MMC.exists(MASTER_LOG_FILE)) {
         File file = SD_MMC.open(MASTER_LOG_FILE, FILE_WRITE);
         if (file) {
-            file.println("Sequence,Timestamp,Throttle,Steering,Sonar,PacketLost,IsOwner,SteerJerk,ThrottleJerk,STCorr");
+            // Updated CSV Header with new ML Features
+            file.println("Sequence,Timestamp,Throttle,Steering,Sonar,PacketLost,IsOwner,DeltaTime,SteerVel,ThrotVel,SteerJerk,ThrotJerk,STCorr");
             file.close();
         }
     }
@@ -48,14 +59,18 @@ void DataReceiver::logToCSV(telemetry_payload_t data) {
     File file = SD_MMC.open(MASTER_LOG_FILE, FILE_APPEND);
     if (!file) return;
 
+    // Derived Features
     int steeringJerk = (_lastReceivedSeq == 0) ? 0 : abs(data.steering - _lastData.steering);
     int throttleJerk = (_lastReceivedSeq == 0) ? 0 : abs(data.throttle - _lastData.throttle);
     int stCorrelation = data.steering * data.throttle;
 
-    file.printf("%lu,%lu,%d,%d,%d,%d,%d,%d,%d,%d\n",
+    // Logging all features including the new real-time ML metrics
+    file.printf("%lu,%lu,%d,%d,%d,%d,%d,%lu,%.4f,%.4f,%d,%d,%d\n",
         data.sequenceNumber, data.timestamp, data.throttle,
         data.steering, data.sonarDistance, data.packetLost, data.isOwner,
+        data.deltaTime, data.steerVelocity, data.throttleVelocity,
         steeringJerk, throttleJerk, stCorrelation);
+
     file.close();
     _lastData = data;
 }
@@ -64,15 +79,25 @@ void DataReceiver::handleIncomingData(const uint8_t* mac, const uint8_t* data, i
     uint8_t decryptedBuffer[64] = { 0 };
     bool decrypted = false;
 
+    if (failureCounter >= FAILURE_THRESHOLD) {
+        mrp.deriveKey(masterSeed, lastValidMc, em);
+        mrp.deriveKey(masterSeed, lastValidMc + 1, en);
+        failureCounter = 0;
+    }
+
     if (mrp.decrypt(data, len, decryptedBuffer, en)) {
-        decrypted = true;
+        decrypted = true;?
         memcpy(em, en, AES_KEY_SIZE);
+        failureCounter = 0;
     }
     else if (mrp.decrypt(data, len, decryptedBuffer, em)) {
         decrypted = true;
+        failureCounter = 0;
     }
-
-    if (!decrypted) return;
+    else {
+        failureCounter++;
+        return;
+    }
 
     telemetry_payload_t incomingData;
     memcpy(&incomingData, decryptedBuffer, sizeof(incomingData));
@@ -80,13 +105,10 @@ void DataReceiver::handleIncomingData(const uint8_t* mac, const uint8_t* data, i
     if (_lastReceivedSeq != 0 && incomingData.sequenceNumber > _lastReceivedSeq + 1) {
         for (unsigned long missingSeq = _lastReceivedSeq + 1; missingSeq < incomingData.sequenceNumber; missingSeq++) {
             telemetry_payload_t paddedData;
+            memset(&paddedData, 0, sizeof(paddedData));
             paddedData.sequenceNumber = missingSeq;
-            paddedData.timestamp = 0;
-            paddedData.throttle = 0;
-            paddedData.steering = 0;
-            paddedData.sonarDistance = 0;
             paddedData.packetLost = 1;
-            paddedData.isOwner = incomingData.isOwner; // Assume mode didn't change mid-loss
+            paddedData.isOwner = incomingData.isOwner;
             paddedData.magic = MAGIC_NUMBER;
             logToCSV(paddedData);
             _totalLostPackets++;
@@ -96,12 +118,15 @@ void DataReceiver::handleIncomingData(const uint8_t* mac, const uint8_t* data, i
     incomingData.packetLost = 0;
     logToCSV(incomingData);
     _lastReceivedSeq = incomingData.sequenceNumber;
+    lastValidMc = _lastReceivedSeq;
 
-    mrp.generateNewKey(en);
+    mrp.deriveKey(masterSeed, _lastReceivedSeq + 1, en);
+
     ack_payload_t ack;
     ack.receiverCounter = _lastReceivedSeq;
     memcpy(ack.newKey, en, AES_KEY_SIZE);
     ack.magic = MAGIC_NUMBER;
+
     uint8_t ackCipher[64] = { 0 };
     mrp.encrypt((uint8_t*)&ack, sizeof(ack), ackCipher, em);
     esp_now_send(mac, ackCipher, sizeof(ack));

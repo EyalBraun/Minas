@@ -2,7 +2,7 @@
  * ============================================================================
  * Project: Minas - Minas Rolling-Key Protocol (MRP) v1.0
  * File: MRP.cpp
- * Description: Implementation of AES-128 and SHA-256 based KDF.
+ * Description: Implementation of AES-128 and SHA-256 based KDF with ML support.
  * ============================================================================
  */
 
@@ -16,7 +16,7 @@ MRPProtocol::MRPProtocol() {
 void MRPProtocol::encrypt(const uint8_t* input, size_t inputLen, uint8_t* output, const uint8_t* key) {
     mbedtls_aes_setkey_enc(&_aesCtx, key, 128);
 
-    // Ensure 16-byte block alignment
+    // Ensure 16-byte block alignment (Max buffer size 64 as per encrypted_packet_t)
     size_t paddedLen = ((inputLen + 15) / 16) * 16;
     uint8_t tempInput[64] = { 0 };
     memcpy(tempInput, input, inputLen);
@@ -37,7 +37,7 @@ bool MRPProtocol::decrypt(const uint8_t* input, size_t inputLen, uint8_t* output
     memcpy(output, tempOutput, inputLen);
 
     // Validation: Check if the decrypted payload contains the valid Magic Number
-    // We check both struct types (Telemetry and ACK)
+    // Checking both struct types (Telemetry and ACK) based on the magic offset
     telemetry_payload_t* testPl = (telemetry_payload_t*)output;
     if (testPl->magic == MAGIC_NUMBER) {
         return true;
@@ -51,21 +51,13 @@ bool MRPProtocol::decrypt(const uint8_t* input, size_t inputLen, uint8_t* output
     return false; // Decryption failed or Magic Number mismatch
 }
 
-/**
- * Deterministic Key Derivation Function (KDF)
- * Uses SHA-256 to derive a 128-bit AES key from a master seed and a counter.
- */
 void MRPProtocol::deriveKey(const uint8_t* seed, unsigned long counter, uint8_t* keyOut) {
     uint8_t hash[32];
     uint8_t input[MASTER_SEED_SIZE + sizeof(unsigned long)];
 
-    // Concatenate Seed || Counter
     memcpy(input, seed, MASTER_SEED_SIZE);
     memcpy(input + MASTER_SEED_SIZE, &counter, sizeof(unsigned long));
 
-    // Run SHA-256
     mbedtls_sha256_ret(input, sizeof(input), hash, 0);
-
-    // Take the first 16 bytes (128 bits) as the AES key
     memcpy(keyOut, hash, AES_KEY_SIZE);
 }
