@@ -1,13 +1,12 @@
 /**
  * ============================================================================
- * Project: Minas - Minas Rolling-Key Protocol (MRP) v1.0
+ * Project: Minas - Minas Rolling-Key Protocol (MRP)
  * File: MRP.cpp
- * Description: Implementation of AES-128 and SHA-256 based KDF.
+ * Description: Implementation of AES-128 encryption and key generation.
  * ============================================================================
  */
 
 #include "MRP.h"
-#include <string.h>
 
 MRPProtocol::MRPProtocol() {
     mbedtls_aes_init(&_aesCtx);
@@ -15,8 +14,8 @@ MRPProtocol::MRPProtocol() {
 
 void MRPProtocol::encrypt(const uint8_t* input, size_t inputLen, uint8_t* output, const uint8_t* key) {
     mbedtls_aes_setkey_enc(&_aesCtx, key, 128);
-
-    // Ensure 16-byte block alignment
+    // Simple ECB mode block padding or direct block cipher for telemetry
+    // For robust telemetry, we pad to 16-byte blocks
     size_t paddedLen = ((inputLen + 15) / 16) * 16;
     uint8_t tempInput[64] = { 0 };
     memcpy(tempInput, input, inputLen);
@@ -36,8 +35,7 @@ bool MRPProtocol::decrypt(const uint8_t* input, size_t inputLen, uint8_t* output
 
     memcpy(output, tempOutput, inputLen);
 
-    // Validation: Check if the decrypted payload contains the valid Magic Number
-    // We check both struct types (Telemetry and ACK)
+    // Check Magic Number in decrypted payload if it matches telemetry struct
     telemetry_payload_t* testPl = (telemetry_payload_t*)output;
     if (testPl->magic == MAGIC_NUMBER) {
         return true;
@@ -48,24 +46,11 @@ bool MRPProtocol::decrypt(const uint8_t* input, size_t inputLen, uint8_t* output
         return true;
     }
 
-    return false; // Decryption failed or Magic Number mismatch
+    return false; // Decryption failed or incorrect key
 }
 
-/**
- * Deterministic Key Derivation Function (KDF)
- * Uses SHA-256 to derive a 128-bit AES key from a master seed and a counter.
- */
-void MRPProtocol::deriveKey(const uint8_t* seed, unsigned long counter, uint8_t* keyOut) {
-    uint8_t hash[32];
-    uint8_t input[MASTER_SEED_SIZE + sizeof(unsigned long)];
-
-    // Concatenate Seed || Counter
-    memcpy(input, seed, MASTER_SEED_SIZE);
-    memcpy(input + MASTER_SEED_SIZE, &counter, sizeof(unsigned long));
-
-    // Run SHA-256
-    mbedtls_sha256_ret(input, sizeof(input), hash, 0);
-
-    // Take the first 16 bytes (128 bits) as the AES key
-    memcpy(keyOut, hash, AES_KEY_SIZE);
+void MRPProtocol::generateNewKey(uint8_t* keyOut) {
+    for (int i = 0; i < AES_KEY_SIZE; i++) {
+        keyOut[i] = (uint8_t)(esp_random() % 256);
+    }
 }

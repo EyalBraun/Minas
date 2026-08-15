@@ -1,8 +1,8 @@
 /**
  * ============================================================================
- * Project: Minas - Minas Rolling-Key Protocol (MRP) v1.0
+ * Project: Minas - Minas Rolling-Key Protocol (MRP)
  * File: MRP.h
- * Description: Hardened cryptographic definitions including KDF and Resync.
+ * Description: Cryptographic and packet definitions for MRP using AES-128.
  * ============================================================================
  */
 
@@ -11,13 +11,10 @@
 
 #include <Arduino.h>
 #include "mbedtls/aes.h"
-#include "mbedtls/sha256.h"
 
  // --- Protocol Constants ---
 #define AES_KEY_SIZE 16          // 128 bits
-#define MASTER_SEED_SIZE 32      // 256 bits for KDF root
 #define MAGIC_NUMBER 0x4D494E41  // "MINA" in ASCII hex
-#define FAILURE_THRESHOLD 5      // Max failures before deterministic resync
 
 // Telemetry Data Payload (32 bytes - AES block aligned)
 typedef struct telemetry_payload_t {
@@ -47,13 +44,9 @@ typedef struct ack_payload_t {
 class MRPProtocol {
 public:
     MRPProtocol();
-
-    // Core Cryptography
     void encrypt(const uint8_t* input, size_t inputLen, uint8_t* output, const uint8_t* key);
     bool decrypt(const uint8_t* input, size_t inputLen, uint8_t* output, const uint8_t* key);
-
-    // Key Derivation Function (KDF)
-    void deriveKey(const uint8_t* seed, unsigned long counter, uint8_t* keyOut);
+    void generateNewKey(uint8_t* keyOut);
 
 private:
     mbedtls_aes_context _aesCtx;
