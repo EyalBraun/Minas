@@ -86,7 +86,7 @@ void DataReceiver::handleIncomingData(const uint8_t* mac, const uint8_t* data, i
     }
 
     if (mrp.decrypt(data, len, decryptedBuffer, en)) {
-        decrypted = true;?
+        decrypted = true;
         memcpy(em, en, AES_KEY_SIZE);
         failureCounter = 0;
     }
@@ -131,3 +131,4 @@ void DataReceiver::handleIncomingData(const uint8_t* mac, const uint8_t* data, i
     mrp.encrypt((uint8_t*)&ack, sizeof(ack), ackCipher, em);
     esp_now_send(mac, ackCipher, sizeof(ack));
 }
+s

@@ -50,6 +50,21 @@ typedef struct ack_payload_t {
     uint32_t magic;
 } ack_payload_t;
 
+// Reserved decision message for the future authorization stage.
+// This structure is intentionally not transmitted or interpreted yet.
+typedef enum drive_decision_t {
+    DRIVE_STOP = 0,
+    DRIVE_CONTINUE = 1
+} drive_decision_t;
+
+typedef struct authorization_decision_payload_t {
+    unsigned long telemetryCounter;
+    uint8_t authorized;       // 0 = unauthorized, 1 = authorized
+    uint8_t decision;         // DRIVE_STOP or DRIVE_CONTINUE
+    uint16_t confidencePermille; // 0..1000; reserved until classifier exists
+    uint32_t magic;
+} authorization_decision_payload_t;
+
 class MRPProtocol {
 public:
     MRPProtocol();
