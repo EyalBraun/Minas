@@ -1,80 +1,60 @@
-# Minas: Secure RC-Car Telemetry and Driver-Authorization Research Platform
+# Minas: ESP32 RC-Car Telemetry and Owner/Non-Owner Research Platform
 
-**Author:** Eyal Braun**Platforms:** ESP32-S3 car controller and ESP32 base station**Framework:** Arduino / PlatformIO**Current status:** Telemetry, encrypted transport, receiver logging and key-rotation prototype. Driver classification and active authorization decisions are not implemented yet.
+Minas is an embedded research platform for collecting driving telemetry from an RC car and studying whether the authorized owner can be distinguished from other drivers by driving behavior.
 
-## Project question
+## Current tested scope
 
-Minas is being developed to investigate whether a driver's authorization can eventually be inferred from driving-behaviour features such as steering, throttle and their rates of change, and whether that decision can be delivered securely to an embedded vehicle controller in real time.
+The current collection firmware supports the following workflow:
 
-The current repository implements the data-collection and secure-transport foundation. It does **not** yet claim to classify drivers or to return an active `CONTINUE`/`STOP` command. Those are future research stages and are documented as such.
+- `MinasDT` runs on a classic ESP32 board, reads a PS5 DualSense controller over Bluetooth Classic, controls a steering servo and ESC, measures distance with an HC-SR04, and sends encrypted telemetry over ESP-NOW.
+- `MinasDR` runs on an ESP32 receiver with SD_MMC storage, decrypts valid telemetry, detects sequence gaps, and creates a separate CSV file for each fixed owner/non-owner trial.
+- Pressing Circle changes the collection label. The car must be at neutral when changing modes. The receiver opens a new file such as `trial_0001_owner.csv` or `trial_0002_nonowner.csv` when the new label is received.
+- The CSV files are intended for research data collection. They are not yet the output of an ML classifier.
 
-## Current architecture
+## Important hardware decision
 
-The system has two embedded nodes:
+The PS5 library used by this version requires Bluetooth Classic. The data-transmitter board must therefore be a classic ESP32 board such as `esp32dev`. An ESP32-S3 cannot use this Bluetooth Classic library. To keep an ESP32-S3, replace the controller solution with a USB-host or BLE-compatible DualSense implementation and adapt the input code separately.
 
-| Component | Role | Current responsibilities |
-| --- | --- | --- |
-| `MinasDT` | Transmitter on the car | Reads PS5 input, controls steering and ESC, measures sonar distance, builds telemetry and encrypts it before ESP-NOW transmission. |
-| `MinasDR` | Receiver/base station | Receives and decrypts telemetry, detects sequence gaps, derives logging features, writes the dataset to an SD card and returns an encrypted key-synchronization ACK. |
-| `shared` | Shared protocol library | AES-128 transport prototype, SHA-256 counter-based key derivation, payload definitions and protocol constants. |
+## Before uploading
 
-The current wire flow is:
+Replace the six zero bytes in `MinasDT/include/Config.h` with the real Wi-Fi station MAC address of MinasDR. Install a voltage divider or level shifter on the HC-SR04 Echo line before connecting it to GPIO23; a standard HC-SR04 Echo output may be 5 V and can damage an ESP32 input.
 
-```
-MinasDT -- encrypted telemetry --> MinasDR
-MinasDR -- encrypted ACK + next key --> MinasDT
-```
+The current collection version deliberately does not claim to implement a battery guardian. The battery ADC constants are disabled until a physical voltage divider is installed and calibrated with a multimeter. Do not rely on software battery protection until that feature is implemented and tested.
 
-The future authorization-decision payload is defined in `shared/MRP.h` as a reserved data structure, but it is intentionally not transmitted or interpreted until a validated classifier and an evaluation protocol exist.
+## Trial files
 
-## Telemetry collected
+Each file contains metadata comments followed by the CSV header:
 
-Each telemetry record contains a monotonic sequence number, timestamp, throttle, steering, sonar distance, packet-loss flag, the local Owner/Guest experiment label, elapsed time since the previous packet, steering velocity, throttle velocity and a magic value used for basic payload validation.
-
-The `isOwner` field is currently an experiment label selected locally on the car with the PS5 controller. It is **not** the output of a station-side classifier and must not be interpreted as automatically verified identity.
-
-The receiver derives additional logging fields, including steering change, throttle change and a simple steering-throttle product. These fields support future dataset exploration; they are not yet a validated driver-recognition model.
-
-## Safety behaviour currently implemented
-
-The car locally returns the ESC to neutral when the PS5 controller disconnects and blocks forward throttle when the sonar reports an obstacle within the configured threshold. These local fail-safes are separate from the future station-side authorization decision. The receiver currently does not command the car to stop because of driver classification or an ACK timeout.
-
-## Repository structure
-
-```
-Minas/
-├── MinasDT/                         Car transmitter firmware
-├── MinasDR/                         Base-station receiver firmware
-├── shared/                          Shared MRP definitions and implementation
-├── Docs/                            Protocol specification, wiring diagram and documentation
-├── README.md                        Project overview and current scope
-└── platformio.ini                   Platform-specific build configuration in each firmware directory
+```text
+# Minas telemetry trial
+# label=owner
+# start_sequence=123
+# firmware_version=collection-v1
+Sequence,TimestampMs,Throttle,Steering,SonarCm,PacketLossCountBefore,IsOwner,DeltaTimeMs,SteeringRate,ThrottleRate,SteeringChange,ThrottleChange,SteeringThrottleProduct
 ```
 
-## Documentation
+A missing packet is represented by the loss count on the next received row. The receiver does not invent zero-valued training rows.
 
-- [MRP technical specification](Docs/MRP_Specification.md)
+## Protocol status
 
-- [Documentation index](Docs/README.md)
+The Minas Rolling-Key Protocol is an original application-layer protocol design for this project. It uses AES-128 and SHA-256 as established cryptographic building blocks. The current version adds length checks and correct AES-block transmission lengths, but it remains a prototype: it uses AES-ECB and a magic number rather than authenticated encryption. Do not use it as a production authorization protocol or as the sole safety mechanism.
 
-- [Complete wiring diagram](Docs/Minas_Wiring_Complete.png)
+## Build
 
-The MRP specification describes the implementation as it exists in this repository, including its current limitations. It does not present the future classifier or authorization command as completed functionality.
+Build the receiver from `MinasDR`:
 
-## Research roadmap
+```bash
+pio run
+```
 
-1. Validate the telemetry pipeline and collect labelled driving sessions under controlled conditions.
+Build the transmitter from `MinasDT`:
 
-1. Define a reproducible train/validation/test split that prevents data leakage between sessions.
+```bash
+pio run
+```
 
-1. Compare baseline and candidate driver-recognition methods using accuracy, precision, recall, F1, false-accept rate and false-reject rate.
+The transmitter uses `huge_app.csv` because the PS5 library makes the firmware larger than the default application partition.
 
-1. Add an authenticated authorization-decision message only after the classifier and failure policy are specified.
+## Safe test order
 
-1. Test latency, packet loss, replay resistance, malformed messages and safe behaviour on timeout or uncertainty.
-
-1. Document limitations, failure cases and reproducibility instructions.
-
-## Scope and security disclaimer
-
-The current MRP implementation is an embedded transport prototype for the research platform. It should not be treated as a production-grade authorization protocol. In particular, the implementation currently uses a pre-shared seed in firmware, AES-ECB block encryption and a magic-number check rather than a complete authenticated-encryption design. These limitations are part of the engineering work that must be addressed before making security claims beyond the prototype.
+Test first with the motor mechanically disconnected or with the driven wheels raised. Verify neutral on boot, controller disconnect, receiver timeout, and sonar obstacle detection. Then verify that the receiver creates the first CSV file and that switching modes creates the next trial file. Only after these checks should the car be tested on the ground.

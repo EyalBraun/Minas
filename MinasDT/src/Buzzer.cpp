@@ -3,22 +3,26 @@
 #include "Config.h"
 
 #define BUZZER_LEDC_CHANNEL 7
-#define BUZZER_PIN 27 // Assuming standard pin, update if different
+static bool buzzerReady = false;
 
 void initBuzzer() {
-    ledcSetup(BUZZER_LEDC_CHANNEL, 2000, 8);
-    ledcAttachPin(BUZZER_PIN, BUZZER_LEDC_CHANNEL);
-    ledcWrite(BUZZER_LEDC_CHANNEL, 0);
+    buzzerReady = (ledcSetup(BUZZER_LEDC_CHANNEL, 2000, 8) != 0);
+    if (buzzerReady) {
+        ledcAttachPin(BUZZER_PIN, BUZZER_LEDC_CHANNEL);
+        ledcWrite(BUZZER_LEDC_CHANNEL, 0);
+    }
 }
 
 void playTone(int frequency, int durationMs) {
+    if (!buzzerReady || durationMs <= 0) return;
+
     if (frequency > 0) {
         ledcSetup(BUZZER_LEDC_CHANNEL, frequency, 8);
         ledcWrite(BUZZER_LEDC_CHANNEL, 127);
-    }
-    else {
+    } else {
         ledcWrite(BUZZER_LEDC_CHANNEL, 0);
     }
+
     delay(durationMs);
     ledcWrite(BUZZER_LEDC_CHANNEL, 0);
 }

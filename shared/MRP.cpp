@@ -14,11 +14,18 @@ MRPProtocol::MRPProtocol() {
 }
 
 void MRPProtocol::encrypt(const uint8_t* input, size_t inputLen, uint8_t* output, const uint8_t* key) {
+    if (input == nullptr || output == nullptr || key == nullptr || inputLen == 0 || inputLen > 64) {
+        return;
+    }
+
     mbedtls_aes_setkey_enc(&_aesCtx, key, 128);
 
-    // Ensure 16-byte block alignment (Max buffer size 64 as per encrypted_packet_t)
+    // Ensure 16-byte block alignment. The caller must transmit paddedLen.
     size_t paddedLen = ((inputLen + 15) / 16) * 16;
+    if (paddedLen > 64) return;
+
     uint8_t tempInput[64] = { 0 };
+    memset(output, 0, 64);
     memcpy(tempInput, input, inputLen);
 
     for (size_t i = 0; i < paddedLen; i += 16) {
@@ -27,6 +34,11 @@ void MRPProtocol::encrypt(const uint8_t* input, size_t inputLen, uint8_t* output
 }
 
 bool MRPProtocol::decrypt(const uint8_t* input, size_t inputLen, uint8_t* output, const uint8_t* key) {
+    if (input == nullptr || output == nullptr || key == nullptr ||
+        inputLen == 0 || inputLen > 64 || (inputLen % 16) != 0) {
+        return false;
+    }
+
     mbedtls_aes_setkey_dec(&_aesCtx, key, 128);
     uint8_t tempOutput[64] = { 0 };
 

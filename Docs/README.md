@@ -1,102 +1,34 @@
-# Minas: Autonomous RC Car Telemetry & Security System
+# Minas Documentation
 
-**Author:** Eyal Braun**Platform:** ESP32-S3 & ESP32**Framework:** Arduino / PlatformIO
+## Implemented collection system
 
----
+The project has two firmware targets. `MinasDT` is the car transmitter. It reads the PS5 controller, controls the servo and ESC, measures sonar distance, and transmits telemetry. `MinasDR` is the base-station receiver. It receives telemetry, stores trial files on an SD card, and returns the protocol acknowledgement.
 
-## 1. Project Overview
+The current implementation is a data-collection prototype. It does not yet run a driver-classification model and it does not yet send a classifier-generated `CONTINUE` or `STOP` authorization decision.
 
-**Minas** is a professional-grade embedded systems project that transforms a standard RC car into a high-tech data collection and security platform. The system uses a **Dual-Controller Architecture** to perform real-time wireless telemetry, safety monitoring, and driver-recognition using Machine Learning.
+## Owner/non-owner trials
 
-### **Core Objectives:**
+The owner label is a research ground-truth label selected before a trial. The label is not an authenticated identity claim. Keep one driver and one fixed label in each trial. Pressing Circle changes the label while the car is neutral. When the receiver receives the new label, it closes the current file and opens a new file.
 
-- **Wireless Telemetry:** Real-time streaming of driving data via ESP-NOW.
+Files are named as follows:
 
-- **Machine Learning Security:** Building a dataset to identify authorized vs. unauthorized drivers based on driving patterns (Steering/Throttle Jerk).
+```text
+trial_0001_owner.csv
+trial_0002_nonowner.csv
+```
 
-- **Battery Guardian:** Active voltage monitoring and emergency shutdown for LiPo safety.
+Do not mix data from two drivers in a single trial file. Keep a separate experiment manifest containing the real driver/session information outside the telemetry file.
 
-- **Obstacle Avoidance:** Integrated sonar-based collision prevention.
+## Hardware safety
 
----
+The HC-SR04 Echo line must not be connected directly to an ESP32 GPIO unless the exact sensor output is confirmed to be 3.3 V safe. Use a voltage divider or level shifter. The ESP32, receiver, servo, ESC and sensor must share a suitable ground, and the BEC voltage must be verified before connection.
 
-## 2. System Architecture
+Battery monitoring is not implemented in the collection firmware. Remove any claim that a 6.8 V Battery Guardian is active unless the ADC divider and calibrated code have been installed and tested.
 
-The project is divided into two main components:
+## Protocol status
 
-### **A. MinasDT (Data Transmitter - The Car)**
+MRP is a project-specific application-layer telemetry protocol. AES-128 and SHA-256 are standard primitives used by the design. The prototype is not production-grade authenticated encryption: AES-ECB, a fixed magic value, firmware-embedded seed material, and incomplete recovery behavior remain limitations.
 
-The "Brain" of the vehicle, running on an **ESP32-S3 (N16R8)**.
+## Reproducibility
 
-- **Control:** Interfaces with a PS5 Controller via Bluetooth.
-
-- **Actuation:** Controls Steering Servo and Brushless ESC (Electronic Speed Controller).
-
-- **Sensors:** HC-SR04 Ultrasonic sensor for obstacle detection and ADC for battery voltage sensing.
-
-- **Communication:** Broadcasts telemetry packets every 100ms using the **ESP-NOW** protocol.
-
-### **B. MinasDR (Data Receiver - The Base Station)**
-
-The "Black Box" of the system, running on an **ESP32 with SD Card support**.
-
-- **Reception:** Listens for telemetry packets from the car.
-
-- **Data Integrity:** Uses a **Monotonic Counter** to detect packet loss and performs **Gap Padding** to maintain a consistent time-series dataset.
-
-- **Feature Engineering:** Calculates real-time ML features (Jerk, Correlation) before logging.
-
-- **Storage:** Saves all data into a centralized `/minas_master_dataset.csv` for ML training.
-
----
-
-## 3. Hardware Requirements
-
-| Component | Specification | Purpose |
-| --- | --- | --- |
-| **Microcontroller (Car)** | ESP32-S3 N16R8 | Main Logic & AI Vector acceleration |
-| **Microcontroller (Base)** | ESP32 Wrover | Telemetry Reception & SD Logging |
-| **Battery** | 2S 7.4V 2500mAh LiPo | Main Power Source |
-| **Sensors** | HC-SR04 Ultrasonic | Obstacle Avoidance |
-| **Storage** | Micro SD Card (FAT32) | Dataset Collection |
-| **Charger** | ToolkitRC M4 Pocket | LiPo Maintenance |
-
----
-
-## 4. Machine Learning Feature Schema
-
-The system generates a professional CSV dataset with the following features for driver identification:
-
-- **Sequence:** Monotonic packet counter.
-
-- **SteerJerk:** Rate of change in steering angle (Detects twitchy vs. smooth drivers).
-
-- **ThrottleJerk:** Rate of change in acceleration.
-
-- **STCorr:** Steering-Throttle correlation (Detects cornering habits).
-
-- **PacketLost:** Flag for handling signal interference.
-
----
-
-## 5. Safety Features
-
-1. **Battery Guardian:** If battery voltage drops below **6.8V**, the car disables the motor and emits a high-pitched siren to prevent cell damage.
-
-1. **Obstacle Fail-safe:** Forward motion is automatically blocked if an obstacle is detected within **30cm**.
-
-1. **Bluetooth Fail-safe:** If the PS5 controller disconnects, the car immediately returns to neutral.
-
----
-
-## 6. Future Roadmap
-
-- **Phase 1:** Integration of an **IMU (MPU6050)** for 6-axis G-force telemetry.
-
-- **Phase 2:** Deployment of the **TensorFlow Lite** model directly on the ESP32-S3 for real-time unauthorized driver detection.
-
-- **Phase 3:** Vision-based lane following using **ESP32-CAM**.
-
----
-
-**Minas is more than an RC car—it's a research platform for Edge AI and Embedded Systems.**
+Record the board model, firmware revision, PS5 library revision, receiver MAC, telemetry interval, SD card format, wiring revision, route/task, driver label, and trial number for every collection session.
