@@ -1,60 +1,89 @@
-# Minas: ESP32 RC-Car Telemetry and Owner/Non-Owner Research Platform
+# Minas: Owner-Recognition Research Platform
 
-Minas is an embedded research platform for collecting driving telemetry from an RC car and studying whether the authorized owner can be distinguished from other drivers by driving behavior.
+Minas is an embedded research platform for collecting RC-car driving telemetry and later studying whether an authorized owner can be distinguished from other drivers by driving behavior.
 
-## Current tested scope
-
-The current collection firmware supports the following workflow:
-
-- `MinasDT` runs on a classic ESP32 board, reads a PS5 DualSense controller over Bluetooth Classic, controls a steering servo and ESC, measures distance with an HC-SR04, and sends encrypted telemetry over ESP-NOW.
-- `MinasDR` runs on an ESP32 receiver with SD_MMC storage, decrypts valid telemetry, detects sequence gaps, and creates a separate CSV file for each fixed owner/non-owner trial.
-- Pressing Circle changes the collection label. The car must be at neutral when changing modes. The receiver opens a new file such as `trial_0001_owner.csv` or `trial_0002_nonowner.csv` when the new label is received.
-- The CSV files are intended for research data collection. They are not yet the output of an ML classifier.
-
-## Important hardware decision
-
-The PS5 library used by this version requires Bluetooth Classic. The data-transmitter board must therefore be a classic ESP32 board such as `esp32dev`. An ESP32-S3 cannot use this Bluetooth Classic library. To keep an ESP32-S3, replace the controller solution with a USB-host or BLE-compatible DualSense implementation and adapt the input code separately.
-
-## Before uploading
-
-Replace the six zero bytes in `MinasDT/include/Config.h` with the real Wi-Fi station MAC address of MinasDR. Install a voltage divider or level shifter on the HC-SR04 Echo line before connecting it to GPIO23; a standard HC-SR04 Echo output may be 5 V and can damage an ESP32 input.
-
-The current collection version deliberately does not claim to implement a battery guardian. The battery ADC constants are disabled until a physical voltage divider is installed and calibrated with a multimeter. Do not rely on software battery protection until that feature is implemented and tested.
-
-## Trial files
-
-Each file contains metadata comments followed by the CSV header:
+## Current architecture
 
 ```text
-# Minas telemetry trial
-# label=owner
-# start_sequence=123
-# firmware_version=collection-v1
-Sequence,TimestampMs,Throttle,Steering,SonarCm,PacketLossCountBefore,IsOwner,DeltaTimeMs,SteeringRate,ThrottleRate,SteeringChange,ThrottleChange,SteeringThrottleProduct
+PS5 DualSense
+      │ Bluetooth Classic
+      ▼
+Controller Unit — ESP32-WROVER
+      ├── reads controller input
+      ├── stores trial data on external microSD
+      ├── contains the future ML decision gate
+      └── sends an authorized command over ESP-NOW
+                    │
+                    ▼
+Vehicle Unit — ESP32-S3 on the car
+      ├── validates the command and CRC
+      ├── drives the steering servo and ESC
+      └── returns to neutral on timeout or denied command
 ```
 
-A missing packet is represented by the loss count on the next received row. The receiver does not invent zero-valued training rows.
+The Controller Unit is an original ESP32/WROVER because the selected DualSense library requires Bluetooth Classic. The Vehicle Unit is the ESP32-S3 and does not connect to the controller; it is the actuator and failsafe node on the car.
 
-## Protocol status
+## Current firmware scope
 
-The Minas Rolling-Key Protocol is an original application-layer protocol design for this project. It uses AES-128 and SHA-256 as established cryptographic building blocks. The current version adds length checks and correct AES-block transmission lengths, but it remains a prototype: it uses AES-ECB and a magic number rather than authenticated encryption. Do not use it as a production authorization protocol or as the sole safety mechanism.
+The Controller Unit reads steering, throttle, triggers and selected buttons from the DualSense. It stores samples in separate trial files on an external SPI microSD module. Pressing Circle switches the manually assigned ground-truth label between `owner` and `nonowner` and opens a new trial file.
+
+The current `classifyDriver()` function is a clearly marked placeholder. `CONTROLLER_OPERATION_MODE=1` is a collection bypass, `CONTROLLER_OPERATION_MODE=2` is intended for shadow evaluation, and `CONTROLLER_OPERATION_MODE=3` is intended for future enforcement. This release does not contain a trained ML model.
+
+The Vehicle Unit never executes a command merely because it arrived from the controller. It accepts only a valid `AuthorizedVehicleCommand` from the configured Controller Unit MAC, rejects old sequences, and returns the servo and ESC to neutral when no fresh command has arrived within the command timeout.
+
+## Data collection for binary classification
+
+The intended target is a binary label: `owner` versus `nonowner`. The label is manually assigned during data collection and remains fixed for each trial. The CSV contains trial number, sequence, timestamp, steering, throttle, L2/R2 values, button mask, label, decision metadata and Vehicle Unit telemetry.
+
+The rows are intended to be grouped into time windows during offline preprocessing. Train, validation and test splits must be performed by driver and session, not by random individual rows, to avoid leakage between adjacent samples from the same drive.
+
+See `ML_DATASET_ASSESSMENT_HE.md` for the data-quality assessment and recommended evaluation method.
+
+## Hardware prerequisites
+
+The Controller Unit requires an original ESP32/WROVER-class board with Bluetooth Classic, an external SPI microSD module and the DualSense controller. The Vehicle Unit requires the ESP32-S3-DevKitC-1 N16R8 and connections for the steering servo, ESC and optional HC-SR04.
+
+The HC-SR04 Echo line must not be connected directly to an ESP32 GPIO if it can output 5 V. Use a voltage divider or level shifter. Confirm the ESC neutral pulse and all GPIO assignments with the actual hardware before powering the motor.
+
+## Configuration before upload
+
+Print the STA MAC of each board through the serial monitor. Put the ESP32-S3 MAC in `ControllerUnit/include/Config.h` as `vehicleUnitAddress`, and put the WROVER MAC in `VehicleUnit/include/Config.h` as `controllerUnitAddress`. Do not leave either address as all zeros.
+
+The Controller Unit SD defaults are SCK 18, MISO 19, MOSI 23 and CS 5. Change these values if the physical module is wired differently.
 
 ## Build
 
-Build the receiver from `MinasDR`:
+Build the Controller Unit:
 
 ```bash
+cd ControllerUnit
 pio run
 ```
 
-Build the transmitter from `MinasDT`:
+Build the Vehicle Unit:
 
 ```bash
+cd VehicleUnit
 pio run
 ```
 
-The transmitter uses `huge_app.csv` because the PS5 library makes the firmware larger than the default application partition.
+The Controller Unit uses the `esp32dev` PlatformIO target because the selected PS5 library requires Bluetooth Classic. The Vehicle Unit uses `esp32-s3-devkitc-1`.
 
-## Safe test order
+## Data files
 
-Test first with the motor mechanically disconnected or with the driven wheels raised. Verify neutral on boot, controller disconnect, receiver timeout, and sonar obstacle detection. Then verify that the receiver creates the first CSV file and that switching modes creates the next trial file. Only after these checks should the car be tested on the ground.
+The Controller Unit creates files such as:
+
+```text
+/trial_1_owner.csv
+/trial_2_nonowner.csv
+```
+
+Each file contains metadata followed by rows with the schema:
+
+```text
+trial_number,input_sequence,timestamp_ms,steering,throttle,l2,r2,buttons_mask,owner_label,ml_decision,confidence_permille,allow_motion,vehicle_sonar_cm,vehicle_failsafe
+```
+
+## Security status
+
+`shared/MinasProtocol.h` defines a versioned command format and CRC32 for accidental corruption detection. CRC32 is not authentication. Before using the system as a security or authorization product, add authenticated encryption, key management, replay protection and a tested allowlist. The firmware is not a certified safety system.
