@@ -182,8 +182,14 @@ void setup() {
     if (!sdReady) Serial.println("[WARN] SD unavailable; samples will not be saved");
     if (sdReady) openTrialFile();
 
-    ps5.begin(PS5_CONTROLLER_MAC);
-    controllerReady = true;
+    const bool ps5Started = ps5.begin(PS5_CONTROLLER_MAC);
+if (!ps5Started) {
+    Serial.println("[FATAL] PS5 Bluetooth initialization failed");
+    return;
+}
+
+controllerReady = true;
+Serial.println("[PS5] Bluetooth stack initialized; waiting for DualSense connection");
     Serial.println("[READY] WROVER Controller Unit: PS5 + SD + authorized-command sender");
 }
 
