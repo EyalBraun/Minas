@@ -24,7 +24,10 @@ bool validDtMacConfigured() {
 }
 
 void safeNeutral() {
+    // Fail-safe state: center steering and put the ESC at neutral.
+    appliedSteering = 90;
     appliedThrottle = ESC_NEUTRAL_ANGLE;
+    steeringServo.write(90);
     throttleESC.write(ESC_NEUTRAL_ANGLE);
 }
 
@@ -62,14 +65,14 @@ void applyPendingCommand() {
     const uint32_t now = millis();
     if (command.sequence <= lastAcceptedSequence) return;
     // Do not compare DT and DR millis() values. They have independent clocks.
+    // The two boards have independent millis() clocks. The DR validates
+    // freshness using the local receive time, not command.issuedAtMs.
     if (now - receivedMs > COMMAND_TIMEOUT_MS) {
         safeNeutral();
         return;
     }
     if (command.allowMotion != 1 || command.decision != MINAS_DECISION_ALLOW_OWNER) {
         safeNeutral();
-        appliedSteering = 90;
-        steeringServo.write(90);
         lastAcceptedSequence = command.sequence;
         lastAcceptedCommandMs = now;
         return;

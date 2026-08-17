@@ -1,168 +1,76 @@
-# \# Minas Documentation
+# Minas Documentation
 
-# 
+## Current architecture
 
-# \## Implemented architecture
+Minas is an embedded research prototype with two firmware targets:
 
-# 
+- **Controller Unit:** ESP32-WROVER/ESP32 Classic. It connects to the PS5 DualSense using Bluetooth Classic, reads controller inputs, stores labeled trial data on an external SPI microSD card, and sends authorized commands over ESP-NOW when the Vehicle Unit MAC is configured.
+- **Vehicle Unit:** ESP32-S3-DevKitC-1 N16R8 mounted on the car. It validates commands from the configured Controller Unit MAC, drives the steering servo and ESC, sends telemetry, and enters neutral on timeout or denial.
 
-# Minas currently contains two firmware targets:
+The Controller Unit can run without the Vehicle Unit MAC while it is unavailable. In that local test mode, it can connect to the DualSense and collect SD data, but it does not send ESP-NOW commands.
 
-# 
+## Data collection
 
-# \- \*\*Controller Unit:\*\* ESP32-WROVER with Bluetooth Classic. It connects to the PS5 DualSense, reads steering, throttle, triggers and selected buttons, stores trial files on an external SPI microSD module, and sends commands over ESP-NOW.
+The binary research labels are `owner` and `nonowner`. The label is manually selected as ground truth for each trial and is not proof of identity. Pressing Circle toggles the label and opens a new CSV file. A trial should contain one driver, one label and one continuous driving segment.
 
-# 
+The current firmware is configured for collection bypass:
 
-# \- \*\*Vehicle Unit:\*\* ESP32-S3 mounted on the car. It validates commands from the configured Controller Unit MAC, drives the steering servo and ESC, reports vehicle telemetry and returns to neutral when a command is denied, invalid, stale or missing.
+```cpp
+#define CONTROLLER_OPERATION_MODE 1
+```
 
-# 
+No trained ML model is included. The classifier function is a placeholder. Modes 2 and 3 are reserved for future shadow evaluation and enforcement after a real model has been integrated and validated.
 
-# The Controller Unit is used for the PS5 connection because the selected DualSense library requires Bluetooth Classic. The Vehicle Unit does not connect to the PS5 controller.
+Before training, convert rows into time windows and split train, validation and test data by driver and session rather than by random rows.
 
-# 
+## Hardware and configuration
 
-# \## Current project status
+The Controller Unit requires an original ESP32/WROVER-class board with Bluetooth Classic, a DualSense and an external SPI microSD module. The Vehicle Unit requires the ESP32-S3-DevKitC-1 N16R8, a steering servo, an ESC and optionally an HC-SR04.
 
-# 
+Configure the DualSense MAC in `ControllerUnit/include/Config.h`. Configure the Vehicle Unit STA MAC in `vehicleUnitAddress` before enabling the full wireless link. While the S3 is unavailable, the address may remain all zeros for local PS5 + SD testing. Configure the Controller Unit STA MAC in `VehicleUnit/include/Config.h` before operating the vehicle.
 
-# The current firmware is a \*\*research data-collection prototype\*\*. It builds for both targets and supports PS5 input, external SD trial logging, ESP-NOW command transfer, owner/non-owner labels and a Vehicle Unit neutral failsafe.
+The default SD wiring is:
 
-# 
+| SD signal | Controller Unit GPIO |
+| --- | --- |
+| SCK | 18 |
+| MISO | 19 |
+| MOSI | 23 |
+| CS | 5 |
 
-# A trained driver-classification model is not included. The function `classifyDriver()` is a placeholder. `CONTROLLER\_OPERATION\_MODE=1` is collection bypass and is the mode intended for gathering labeled data. Shadow evaluation and enforcement require a real classifier and separate validation on unseen drivers and sessions.
+The default Vehicle Unit pins are:
 
-# 
+| Function | GPIO |
+| --- | --- |
+| Steering servo | 25 |
+| ESC | 26 |
+| Sonar trigger | 22 |
+| Sonar echo | 23 |
 
-# \## Owner/non-owner trials
+Verify the actual board wiring. Do not connect a 5 V HC-SR04 Echo signal directly to an ESP32 GPIO; use a divider or level shifter.
 
-# 
+## Build
 
-# The target label is binary: `owner` versus `nonowner`. The label is manually assigned as research ground truth for each trial. It is not cryptographic proof of the identity of the person holding the controller.
+```bash
+cd ControllerUnit
+pio run
 
-# 
+cd ../VehicleUnit
+pio run
+```
 
-# One trial must contain one driver, one fixed label and one continuous experimental segment. Pressing Circle toggles the manual label and opens a new CSV trial file on the Controller Unit’s SD card.
+The Controller Unit uses the original ESP32 target for Bluetooth Classic. The Vehicle Unit uses the ESP32-S3 target with 16 MB flash and OPI PSRAM settings defined in its `platformio.ini`.
 
-# 
+## Bench test
 
-# Example files are:
+Before connecting the motor, lift the wheels or disconnect the motor mechanically. Confirm that the Vehicle Unit starts with centered steering and ESC neutral. For local testing without the S3, confirm that the PS5 connects and the Controller Unit creates a trial file on the SD card. After configuring both MAC addresses, confirm that the Vehicle Unit receives valid commands and returns to neutral when the Controller Unit or PS5 is disconnected.
 
-# 
+## Safety and security limitations
 
-# ```
+These are research-prototype safeguards, not certified safety controls. CRC32 detects accidental corruption but is not authentication. The current system does not provide authenticated encryption, secure provisioning, complete replay protection or certified vehicle safety. Battery monitoring and a Battery Guardian are not implemented.
 
-# /trial\_1\_owner.csv
+Bench-test with the wheels lifted or the motor disconnected before applying battery power.
 
-# /trial\_2\_nonowner.csv
+## Legacy files
 
-# ```
-
-# 
-
-# Each file contains metadata followed by rows with trial number, input sequence, timestamp, steering, throttle, L2/R2 values, button mask, owner label, decision metadata and Vehicle Unit telemetry.
-
-# 
-
-# For machine-learning evaluation, split the data by driver and session rather than by random rows. Adjacent rows from one trial must not appear in both the training and test sets.
-
-# 
-
-# \## Hardware and wiring safety
-
-# 
-
-# The Controller Unit requires an original ESP32/WROVER-class board, a PS5 DualSense controller and an external SPI microSD module. The Vehicle Unit requires an ESP32-S3-DevKitC-1 N16R8, a steering servo and an ESC. HC-SR04 is optional.
-
-# 
-
-# The default Controller Unit SD wiring is SCK=18, MISO=19, MOSI=23 and CS=5. Change the values in `ControllerUnit/include/Config.h` if the wiring differs.
-
-# 
-
-# The HC-SR04 Echo line must not be connected directly to an ESP32 GPIO if the sensor can output 5 V. Use a voltage divider or level shifter. Verify common ground, BEC voltage, servo power and ESC neutral behavior before applying battery power.
-
-# 
-
-# Battery monitoring and a Battery Guardian are not implemented in the current firmware. They must not be described as active features.
-
-# 
-
-# \## Configuration
-
-# 
-
-# Print the STA MAC of both boards through the serial monitor before upload.
-
-# 
-
-# Set the ESP32-S3 MAC in `ControllerUnit/include/Config.h` using `vehicleUnitAddress`. Set the ESP32-WROVER MAC in `VehicleUnit/include/Config.h` using `controllerUnitAddress`. Do not leave either address as all zeros.
-
-# 
-
-# The Controller Unit also contains a fixed PS5 controller address in `ControllerUnit/include/Config.h`. It must match the DualSense used for the experiment.
-
-# 
-
-# \## Build
-
-# 
-
-# Build the Controller Unit:
-
-# 
-
-# ```bash
-
-# cd ControllerUnit
-
-# pio run
-
-# ```
-
-# 
-
-# Build the Vehicle Unit:
-
-# 
-
-# ```bash
-
-# cd VehicleUnit
-
-# pio run
-
-# ```
-
-# 
-
-# The Controller Unit uses the `esp32dev` PlatformIO target because the selected PS5 library requires Bluetooth Classic. The Vehicle Unit uses `esp32-s3-devkitc-1` with a 16 MB flash configuration.
-
-# 
-
-# \## Bench-test procedure
-
-# 
-
-# Before connecting the motor, lift the wheels or mechanically disconnect the motor. Confirm that the Vehicle Unit starts with the steering servo centered and the ESC at neutral. Confirm that the PS5 connects to the Controller Unit, the SD card opens successfully, a trial file is created, and the Vehicle Unit receives a valid command.
-
-# 
-
-# Then disconnect the Controller Unit or the PS5 and verify that the Vehicle Unit returns to neutral after the local command timeout. Do not begin driving until this test succeeds.
-
-# 
-
-# \## Protocol status
-
-# 
-
-# The current command path uses `shared/MinasProtocol.h`, `AuthorizedVehicleCommand` and `VehicleTelemetry`. CRC32 is used for accidental-corruption detection and is not an authentication tag.
-
-# 
-
-# The old `shared/MRP.cpp`, `shared/MRP.h` and `Docs/MRP\_Specification.md` describe a legacy prototype and are not the command path used by the current Controller Unit and Vehicle Unit build. They should be marked as legacy or replaced with a specification for `shared/MinasProtocol.h`.
-
-# 
-
-# The firmware is not a production authorization system or a certified safety system. Before classifier output is allowed to control the vehicle, authenticated encryption, replay protection, secure provisioning and extensive fail-safe testing are required.
-
+`shared/MRP.cpp`, `shared/MRP.h` and `Docs/MRP_Specification.md` describe an older protocol prototype. The current command path uses `shared/MinasProtocol.h`, `AuthorizedVehicleCommand` and `VehicleTelemetry`. The legacy files are retained for historical reference and should not be treated as the current transport specification.

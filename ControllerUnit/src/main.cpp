@@ -103,6 +103,7 @@ void sendCommand(int steering, int throttle, MinasDecision decision,
     command.throttle = command.allowMotion ? constrain(throttle, 0, 180) : ESC_NEUTRAL_ANGLE;
     command.confidencePermille = confidence;
     minasFinalize(command);
+    if (!radioReady) return;
     const esp_err_t result = esp_now_send(vehicleUnitAddress,
         reinterpret_cast<const uint8_t*>(&command), sizeof(command));
     if (result != ESP_OK) Serial.printf("[RADIO] send failed: %d\n", result);
@@ -158,24 +159,25 @@ void setup() {
     delay(500);
     WiFi.mode(WIFI_STA);
     Serial.printf("[ControllerUnit] STA MAC: %s\n", WiFi.macAddress().c_str());
+    // The S3 MAC is intentionally allowed to remain unset while the
+    // Controller Unit is being tested by itself. In that case PS5 + SD
+    // collection continues, but no ESP-NOW command is sent.
     if (!validMacConfigured()) {
-        Serial.println("[FATAL] Set vehicleUnitAddress to the S3 Vehicle Unit STA MAC in Config.h");
-        return;
+        Serial.println("[WARN] vehicleUnitAddress is not set; PS5/SD local test mode");
+    } else if (esp_now_init() != ESP_OK) {
+        Serial.println("[WARN] esp_now_init failed; continuing without Vehicle Unit");
+    } else {
+        esp_now_peer_info_t peer{};
+        memcpy(peer.peer_addr, vehicleUnitAddress, 6);
+        peer.channel = 0;
+        peer.encrypt = false;
+        if (esp_now_add_peer(&peer) != ESP_OK) {
+            Serial.println("[WARN] esp_now_add_peer failed; continuing without Vehicle Unit");
+        } else {
+            esp_now_register_recv_cb(esp_now_recv_cb_t(onDataRecv));
+            radioReady = true;
+        }
     }
-    if (esp_now_init() != ESP_OK) {
-        Serial.println("[FATAL] esp_now_init failed");
-        return;
-    }
-    esp_now_peer_info_t peer{};
-    memcpy(peer.peer_addr, vehicleUnitAddress, 6);
-    peer.channel = 0;
-    peer.encrypt = false;
-    if (esp_now_add_peer(&peer) != ESP_OK) {
-        Serial.println("[FATAL] esp_now_add_peer failed");
-        return;
-    }
-    esp_now_register_recv_cb(esp_now_recv_cb_t(onDataRecv));
-    radioReady = true;
 
     SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
     sdReady = SD.begin(SD_CS_PIN, SPI);
@@ -190,11 +192,12 @@ if (!ps5Started) {
 
 controllerReady = true;
 Serial.println("[PS5] Bluetooth stack initialized; waiting for DualSense connection");
-    Serial.println("[READY] WROVER Controller Unit: PS5 + SD + authorized-command sender");
+    Serial.printf("[READY] Controller Unit: PS5 + SD; ESP-NOW=%s\n",
+                  radioReady ? "enabled" : "waiting for Vehicle Unit MAC");
 }
 
 void loop() {
-    if (!radioReady || !controllerReady) {
+    if (!controllerReady) {
         delay(20);
         return;
     }

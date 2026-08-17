@@ -74,7 +74,7 @@ The current firmware does not implement battery monitoring or a Battery Guardian
 
 Before uploading firmware, print the STA MAC of both boards through the serial monitor.
 
-Set the ESP32-S3 MAC in `ControllerUnit/include/Config.h` using `vehicleUnitAddress`. Set the ESP32-WROVER MAC in `VehicleUnit/include/Config.h` using `controllerUnitAddress`. Neither address may remain all zeros.
+Set the ESP32-S3 MAC in `ControllerUnit/include/Config.h` using `vehicleUnitAddress` before enabling the full Controller-to-Vehicle link. While the S3 is unavailable, `vehicleUnitAddress` may remain all zeros: the Controller Unit will run in local PS5 + SD collection mode and will not send ESP-NOW commands. Set the ESP32-WROVER MAC in `VehicleUnit/include/Config.h` using `controllerUnitAddress` before operating the Vehicle Unit. Do not connect the motor until both addresses are configured and the bench test passes.
 
 The default Controller Unit SD wiring is:
 
@@ -97,7 +97,7 @@ cd ../VehicleUnit
 pio run
 ```
 
-The Controller Unit uses the `esp32dev` PlatformIO target because the selected PS5 library requires Bluetooth Classic. The Vehicle Unit uses the `esp32-s3-devkitc-1` target with a 16 MB flash configuration.
+The Controller Unit uses the `esp32dev` PlatformIO target because the selected PS5 library requires Bluetooth Classic. The Vehicle Unit uses the `esp32-s3-devkitc-1` target with 16 MB flash and OPI PSRAM build settings for the ESP32-S3-DevKitC-1 N16R8 variant. These settings are defined explicitly in `VehicleUnit/platformio.ini`.
 
 ## Safety and security limitations
 
