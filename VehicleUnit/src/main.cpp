@@ -3,28 +3,26 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include "Config.h"
-#include "../../shared/MinasProtocol.h"
+#include "../../shared/MRP.h"
 
 Servo steeringServo;
 Servo throttleESC;
-volatile bool commandPending = false;
-volatile uint32_t pendingReceivedMs = 0;
-AuthorizedVehicleCommand pendingCommand{};
+MRPProtocol mrp;
+uint8_t rollingKey[AES_KEY_SIZE] = {};
 uint32_t lastAcceptedSequence = 0;
 uint32_t lastAcceptedCommandMs = 0;
-uint32_t telemetrySequence = 0;
+uint32_t lastReceivedPacketMs = 0;
 uint32_t lastTelemetryMs = 0;
 int appliedSteering = 90;
 int appliedThrottle = ESC_NEUTRAL_ANGLE;
 int sonarDistanceCm = 999;
 
-bool validDtMacConfigured() {
+bool validControllerMacConfigured() {
     for (uint8_t byte : controllerUnitAddress) if (byte != 0x00) return true;
     return false;
 }
 
 void safeNeutral() {
-    // Fail-safe state: center steering and put the ESC at neutral.
     appliedSteering = 90;
     appliedThrottle = ESC_NEUTRAL_ANGLE;
     steeringServo.write(90);
@@ -41,69 +39,62 @@ int readSonarCm() {
     return duration == 0 ? 999 : static_cast<int>((duration * 0.0343f) / 2.0f);
 }
 
-void onDataRecv(const uint8_t* mac, const uint8_t* data, int len) {
-    if (mac == nullptr || data == nullptr || len != static_cast<int>(sizeof(AuthorizedVehicleCommand))) return;
-    if (memcmp(mac, controllerUnitAddress, 6) != 0) return;
-    AuthorizedVehicleCommand command{};
-    memcpy(&command, data, sizeof(command));
-    if (!minasValidate(command) || command.messageType != MINAS_MSG_AUTHORIZED_COMMAND) return;
-    if (command.sequence <= lastAcceptedSequence) return;
-    pendingCommand = command;
-    pendingReceivedMs = millis();
-    commandPending = true;
+bool sendAck(uint32_t acceptedCounter, const uint8_t nextKey[AES_KEY_SIZE],
+             const uint8_t currentKey[AES_KEY_SIZE]) {
+    ack_payload_t ack{};
+    ack.receiverCounter = acceptedCounter;
+    memcpy(ack.newKey, nextKey, AES_KEY_SIZE);
+    ack.magic = MAGIC_NUMBER;
+
+    uint8_t ciphertext[MRP_MAX_CIPHERTEXT_SIZE] = {};
+    size_t ciphertextLength = 0;
+    if (!mrp.encrypt(reinterpret_cast<const uint8_t*>(&ack), sizeof(ack),
+                     ciphertext, currentKey, ciphertextLength)) {
+        Serial.println("[MRP] ACK encryption failed");
+        return false;
+    }
+    return esp_now_send(controllerUnitAddress, ciphertext, ciphertextLength) == ESP_OK;
 }
 
-void applyPendingCommand() {
-    if (!commandPending) return;
-    noInterrupts();
-    AuthorizedVehicleCommand command{};
-    memcpy(&command, &pendingCommand, sizeof(command));
-    const uint32_t receivedMs = pendingReceivedMs;
-    commandPending = false;
-    interrupts();
+void onDataRecv(const uint8_t* mac, const uint8_t* data, int len) {
+    if (mac == nullptr || data == nullptr ||
+        memcmp(mac, controllerUnitAddress, 6) != 0 ||
+        len != static_cast<int>(mrpPaddedLength(sizeof(telemetry_payload_t)))) return;
 
-    const uint32_t now = millis();
-    if (command.sequence <= lastAcceptedSequence) return;
-    // Do not compare DT and DR millis() values. They have independent clocks.
-    // The two boards have independent millis() clocks. The DR validates
-    // freshness using the local receive time, not command.issuedAtMs.
-    if (now - receivedMs > COMMAND_TIMEOUT_MS) {
+    uint8_t plaintext[MRP_MAX_CIPHERTEXT_SIZE] = {};
+    if (!mrp.decrypt(data, static_cast<size_t>(len), plaintext, rollingKey)) return;
+
+    telemetry_payload_t payload{};
+    memcpy(&payload, plaintext, sizeof(payload));
+    if (payload.magic != MAGIC_NUMBER || payload.sequenceNumber <= lastAcceptedSequence) return;
+
+    const uint8_t currentKey[AES_KEY_SIZE] = {
+        rollingKey[0], rollingKey[1], rollingKey[2], rollingKey[3],
+        rollingKey[4], rollingKey[5], rollingKey[6], rollingKey[7],
+        rollingKey[8], rollingKey[9], rollingKey[10], rollingKey[11],
+        rollingKey[12], rollingKey[13], rollingKey[14], rollingKey[15]
+    };
+    uint8_t nextKey[AES_KEY_SIZE] = {};
+    mrp.deriveKey(MRP_MASTER_SEED, payload.sequenceNumber + 1U, nextKey);
+
+    // ACK is encrypted with the key used for the accepted packet. Only after
+    // constructing/sending it do both sides advance to the next rolling key.
+    if (!sendAck(payload.sequenceNumber, nextKey, currentKey)) return;
+    memcpy(rollingKey, nextKey, AES_KEY_SIZE);
+
+    lastAcceptedSequence = payload.sequenceNumber;
+    lastAcceptedCommandMs = millis();
+    lastReceivedPacketMs = lastAcceptedCommandMs;
+    sonarDistanceCm = payload.sonarDistance;
+
+    if (payload.isOwner != 1) {
         safeNeutral();
         return;
     }
-    if (command.allowMotion != 1 || command.decision != MINAS_DECISION_ALLOW_OWNER) {
-        safeNeutral();
-        lastAcceptedSequence = command.sequence;
-        lastAcceptedCommandMs = now;
-        return;
-    }
-
-    appliedSteering = constrain(command.steering, 0, 180);
-    appliedThrottle = constrain(command.throttle, 0, 180);
+    appliedSteering = constrain(payload.steering, 0, 180);
+    appliedThrottle = constrain(payload.throttle, 0, 180);
     steeringServo.write(appliedSteering);
     throttleESC.write(appliedThrottle);
-    lastAcceptedSequence = command.sequence;
-    lastAcceptedCommandMs = now;
-}
-
-void sendTelemetry() {
-    const uint32_t now = millis();
-    if (now - lastTelemetryMs < TELEMETRY_INTERVAL_MS) return;
-    lastTelemetryMs = now;
-    VehicleTelemetry packet{};
-    packet.magic = MINAS_PROTOCOL_MAGIC;
-    packet.version = MINAS_PROTOCOL_VERSION;
-    packet.messageType = MINAS_MSG_VEHICLE_TELEMETRY;
-    packet.sequence = ++telemetrySequence;
-    packet.timestampMs = now;
-    packet.steeringApplied = appliedSteering;
-    packet.throttleApplied = appliedThrottle;
-    packet.sonarDistanceCm = sonarDistanceCm;
-    packet.packetLoss = 0;
-    packet.failsafeActive = (lastAcceptedCommandMs == 0 ||
-        now - lastAcceptedCommandMs > COMMAND_TIMEOUT_MS) ? 1 : 0;
-    minasFinalize(packet);
-    esp_now_send(controllerUnitAddress, reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
 }
 
 void setup() {
@@ -116,13 +107,13 @@ void setup() {
     ESP32PWM::allocateTimer(1);
     steeringServo.attach(SERVO_PIN, SERVO_MIN_PULSE, SERVO_MAX_PULSE);
     throttleESC.attach(ESC_PIN, ESC_MIN_PULSE, ESC_MAX_PULSE);
-    steeringServo.write(90);
     safeNeutral();
 
+    mrp.deriveKey(MRP_MASTER_SEED, 0, rollingKey);
     WiFi.mode(WIFI_STA);
     Serial.printf("[VehicleUnit] STA MAC: %s\n", WiFi.macAddress().c_str());
-    if (!validDtMacConfigured()) {
-        Serial.println("[FATAL] Set controllerUnitAddress to the WROVER Controller Unit STA MAC in Config.h");
+    if (!validControllerMacConfigured()) {
+        Serial.println("[FATAL] Set controllerUnitAddress to the WROVER STA MAC in Config.h");
         return;
     }
     if (esp_now_init() != ESP_OK) {
@@ -138,16 +129,18 @@ void setup() {
         return;
     }
     esp_now_register_recv_cb(esp_now_recv_cb_t(onDataRecv));
-    Serial.println("[READY] ESP32-S3 Vehicle Unit: authorized-command vehicle actuator");
+    Serial.println("[READY] ESP32-S3 Vehicle Unit: encrypted Minas MRP actuator");
 }
 
 void loop() {
-    applyPendingCommand();
     const uint32_t now = millis();
-    if (lastAcceptedCommandMs == 0 || now - lastAcceptedCommandMs > COMMAND_TIMEOUT_MS) safeNeutral();
+    if (lastAcceptedCommandMs == 0 ||
+        now - lastAcceptedCommandMs > COMMAND_TIMEOUT_MS) {
+        safeNeutral();
+    }
     if (now - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
+        lastTelemetryMs = now;
         sonarDistanceCm = readSonarCm();
-        sendTelemetry();
     }
     delay(1);
 }

@@ -1,11 +1,3 @@
-/**
- * ============================================================================
- * Project: Minas - Minas Rolling-Key Protocol (MRP) v1.0
- * File: MRP.cpp
- * Description: Implementation of AES-128 and SHA-256 based KDF with ML support.
- * ============================================================================
- */
-
 #include "MRP.h"
 #include <string.h>
 
@@ -13,63 +5,70 @@ MRPProtocol::MRPProtocol() {
     mbedtls_aes_init(&_aesCtx);
 }
 
-void MRPProtocol::encrypt(const uint8_t* input, size_t inputLen, uint8_t* output, const uint8_t* key) {
-    if (input == nullptr || output == nullptr || key == nullptr || inputLen == 0 || inputLen > 64) {
-        return;
-    }
-
-    mbedtls_aes_setkey_enc(&_aesCtx, key, 128);
-
-    // Ensure 16-byte block alignment. The caller must transmit paddedLen.
-    size_t paddedLen = ((inputLen + 15) / 16) * 16;
-    if (paddedLen > 64) return;
-
-    uint8_t tempInput[64] = { 0 };
-    memset(output, 0, 64);
-    memcpy(tempInput, input, inputLen);
-
-    for (size_t i = 0; i < paddedLen; i += 16) {
-        mbedtls_aes_crypt_ecb(&_aesCtx, MBEDTLS_AES_ENCRYPT, tempInput + i, output + i);
-    }
+MRPProtocol::~MRPProtocol() {
+    mbedtls_aes_free(&_aesCtx);
 }
 
-bool MRPProtocol::decrypt(const uint8_t* input, size_t inputLen, uint8_t* output, const uint8_t* key) {
+bool MRPProtocol::encrypt(const uint8_t* input, size_t inputLen, uint8_t* output,
+                          const uint8_t* key, size_t& outputLen) {
+    outputLen = 0;
     if (input == nullptr || output == nullptr || key == nullptr ||
-        inputLen == 0 || inputLen > 64 || (inputLen % 16) != 0) {
+        inputLen == 0 || inputLen > MRP_MAX_CIPHERTEXT_SIZE) {
         return false;
     }
 
-    mbedtls_aes_setkey_dec(&_aesCtx, key, 128);
-    uint8_t tempOutput[64] = { 0 };
+    const size_t paddedLen = mrpPaddedLength(inputLen);
+    if (paddedLen > MRP_MAX_CIPHERTEXT_SIZE) return false;
 
-    for (size_t i = 0; i < inputLen; i += 16) {
-        mbedtls_aes_crypt_ecb(&_aesCtx, MBEDTLS_AES_DECRYPT, input + i, tempOutput + i);
+    uint8_t paddedInput[MRP_MAX_CIPHERTEXT_SIZE] = {};
+    memcpy(paddedInput, input, inputLen);
+
+    if (mbedtls_aes_setkey_enc(&_aesCtx, key, 128) != 0) return false;
+    for (size_t offset = 0; offset < paddedLen; offset += 16U) {
+        if (mbedtls_aes_crypt_ecb(&_aesCtx, MBEDTLS_AES_ENCRYPT,
+                                  paddedInput + offset, output + offset) != 0) {
+            memset(output, 0, MRP_MAX_CIPHERTEXT_SIZE);
+            return false;
+        }
     }
-
-    memcpy(output, tempOutput, inputLen);
-
-    // Validation: Check if the decrypted payload contains the valid Magic Number
-    // Checking both struct types (Telemetry and ACK) based on the magic offset
-    telemetry_payload_t* testPl = (telemetry_payload_t*)output;
-    if (testPl->magic == MAGIC_NUMBER) {
-        return true;
-    }
-
-    ack_payload_t* testAck = (ack_payload_t*)output;
-    if (testAck->magic == MAGIC_NUMBER) {
-        return true;
-    }
-
-    return false; // Decryption failed or Magic Number mismatch
+    outputLen = paddedLen;
+    return true;
 }
 
-void MRPProtocol::deriveKey(const uint8_t* seed, unsigned long counter, uint8_t* keyOut) {
-    uint8_t hash[32];
-    uint8_t input[MASTER_SEED_SIZE + sizeof(unsigned long)];
+bool MRPProtocol::decrypt(const uint8_t* input, size_t inputLen, uint8_t* output,
+                          const uint8_t* key) {
+    if (input == nullptr || output == nullptr || key == nullptr ||
+        inputLen == 0 || inputLen > MRP_MAX_CIPHERTEXT_SIZE ||
+        (inputLen % 16U) != 0) {
+        return false;
+    }
 
+    if (mbedtls_aes_setkey_dec(&_aesCtx, key, 128) != 0) return false;
+    uint8_t plaintext[MRP_MAX_CIPHERTEXT_SIZE] = {};
+    for (size_t offset = 0; offset < inputLen; offset += 16U) {
+        if (mbedtls_aes_crypt_ecb(&_aesCtx, MBEDTLS_AES_DECRYPT,
+                                  input + offset, plaintext + offset) != 0) {
+            return false;
+        }
+    }
+    memcpy(output, plaintext, inputLen);
+
+    // The caller validates the expected structure and its magic field. The
+    // magic is before zero padding, so it cannot be checked at ciphertext end.
+    return true;
+}
+
+void MRPProtocol::deriveKey(const uint8_t* seed, uint32_t counter,
+                            uint8_t* keyOut) {
+    if (seed == nullptr || keyOut == nullptr) return;
+
+    uint8_t input[MASTER_SEED_SIZE + sizeof(uint32_t)] = {};
+    uint8_t hash[32] = {};
     memcpy(input, seed, MASTER_SEED_SIZE);
-    memcpy(input + MASTER_SEED_SIZE, &counter, sizeof(unsigned long));
-
-    mbedtls_sha256_ret(input, sizeof(input), hash, 0);
+    memcpy(input + MASTER_SEED_SIZE, &counter, sizeof(counter));
+    if (mbedtls_sha256_ret(input, sizeof(input), hash, 0) != 0) {
+        memset(keyOut, 0, AES_KEY_SIZE);
+        return;
+    }
     memcpy(keyOut, hash, AES_KEY_SIZE);
 }

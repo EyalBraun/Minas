@@ -103,7 +103,7 @@ The Controller Unit uses the `esp32dev` PlatformIO target because the selected P
 
 The Vehicle Unit starts with the steering servo centered and the ESC at neutral. It accepts only valid commands from the configured Controller Unit MAC, rejects old sequence numbers and returns to neutral when no fresh command has been received within the local timeout.
 
-These are research-prototype safeguards, not certified safety controls. The current CRC32 detects accidental corruption but is not authentication. The project does not yet provide authenticated encryption, secure key provisioning, complete replay protection or a certified safety mechanism.
+These are research-prototype safeguards, not certified safety controls. The active transport is Minas MRP. The Controller Unit encrypts the padded `telemetry_payload_t` with AES-128-ECB, the Vehicle Unit validates its magic and sequence, and the Vehicle Unit returns an encrypted `ack_payload_t` containing the next rolling key. This research MRP implementation is not production-grade authorization security: ECB, a fixed seed and a magic value do not provide a true authentication tag. Secure provisioning, complete replay protection and a certified safety mechanism are not implemented.
 
 Do not connect the motor or apply battery power until the system has passed a bench test with the wheels lifted or the motor mechanically disconnected.
 

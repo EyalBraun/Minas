@@ -67,10 +67,12 @@ Before connecting the motor, lift the wheels or disconnect the motor mechanicall
 
 ## Safety and security limitations
 
-These are research-prototype safeguards, not certified safety controls. CRC32 detects accidental corruption but is not authentication. The current system does not provide authenticated encryption, secure provisioning, complete replay protection or certified vehicle safety. Battery monitoring and a Battery Guardian are not implemented.
+These are research-prototype safeguards, not certified safety controls. The active transport is Minas MRP: the Controller Unit encrypts the telemetry/command payload with AES-128-ECB, the Vehicle Unit validates the MRP magic and sequence, and the Vehicle Unit returns an encrypted ACK containing the next rolling key. MRP is a research protocol and does not provide production-grade authentication because it uses ECB, a fixed research seed and a magic value rather than an authentication tag. Secure provisioning, complete replay protection and certified vehicle safety are not implemented. Battery monitoring and a Battery Guardian are not implemented.
 
 Bench-test with the wheels lifted or the motor disconnected before applying battery power.
 
-## Legacy files
+## Minas MRP transport
 
-`shared/MRP.cpp`, `shared/MRP.h` and `Docs/MRP_Specification.md` describe an older protocol prototype. The current command path uses `shared/MinasProtocol.h`, `AuthorizedVehicleCommand` and `VehicleTelemetry`. The legacy files are retained for historical reference and should not be treated as the current transport specification.
+`shared/MRP.h` and `shared/MRP.cpp` are compiled into both firmware images through `ControllerUnit/src/MRP.cpp` and `VehicleUnit/src/MRP.cpp`. The active wire flow follows `Docs/MRP_Specification.md`: Controller Unit to Vehicle Unit sends a padded encrypted `telemetry_payload_t`; the Vehicle Unit decrypts and validates it, applies the steering/throttle only when the authorization field allows motion, then returns a padded encrypted `ack_payload_t`. Both sides derive the next AES key from the shared research seed and accepted counter. `shared/MinasProtocol.h` is no longer used by the active firmware path.
+
+The fixed seed and AES-ECB mode are retained because this project explicitly studies the Minas MRP design. Do not describe this implementation as production-grade authorization security; replace it with authenticated encryption and secure per-device provisioning before using it outside a controlled research bench.

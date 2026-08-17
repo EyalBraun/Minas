@@ -5,22 +5,27 @@
 #include <esp_now.h>
 #include <ps5Controller.h>
 #include "Config.h"
-#include "../../shared/MinasProtocol.h"
+#include "../../shared/MRP.h"
 
 namespace {
+MRPProtocol mrp;
 bool radioReady = false;
 bool controllerReady = false;
 bool sdReady = false;
+bool awaitingAck = false;
 bool ownerLabel = INITIAL_OWNER_LABEL != 0;
 bool previousCircle = false;
 uint32_t inputSequence = 0;
 uint32_t commandSequence = 0;
 uint32_t trialNumber = 0;
 uint32_t lastSendMs = 0;
+uint32_t lastAckMs = 0;
 uint32_t lastVehicleTelemetryMs = 0;
+uint32_t lastAckedCounter = 0;
+uint8_t rollingKey[AES_KEY_SIZE] = {};
 String activeFilePath;
 File activeFile;
-VehicleTelemetry latestVehicleTelemetry{};
+int latestSonarDistance = 999;
 
 bool validMacConfigured() {
     for (uint8_t byte : vehicleUnitAddress) if (byte != 0x00) return true;
@@ -44,7 +49,8 @@ bool openTrialFile() {
     } while (SD.exists(activeFilePath));
     activeFile = SD.open(activeFilePath, FILE_WRITE);
     if (!activeFile) return false;
-    activeFile.println("schema_version=2");
+    activeFile.println("schema_version=3");
+    activeFile.println("transport=Minas_MRP_AES_ECB_rolling_key");
     activeFile.printf("label=%s\n", label);
     activeFile.printf("operation_mode=%d\n", CONTROLLER_OPERATION_MODE);
     activeFile.println("---");
@@ -55,16 +61,15 @@ bool openTrialFile() {
 }
 
 void writeSample(uint32_t seq, uint32_t now, int steering, int throttle,
-                 int l2, int r2, uint16_t buttonsMask,
-                 MinasDecision decision, uint16_t confidence, bool allow) {
+                 int l2, int r2, uint16_t buttonsMask, uint8_t decision,
+                 uint16_t confidence, bool allow) {
     if (!activeFile) return;
     activeFile.printf("%lu,%lu,%lu,%d,%d,%d,%d,%u,%d,%u,%u,%d,%d,%d\n",
         static_cast<unsigned long>(trialNumber), static_cast<unsigned long>(seq),
         static_cast<unsigned long>(now), steering, throttle, l2, r2,
         static_cast<unsigned>(buttonsMask), ownerLabel ? 1 : 0,
         static_cast<unsigned>(decision), static_cast<unsigned>(confidence),
-        allow ? 1 : 0, latestVehicleTelemetry.sonarDistanceCm,
-        latestVehicleTelemetry.failsafeActive ? 1 : 0);
+        allow ? 1 : 0, latestSonarDistance, awaitingAck ? 1 : 0);
     static uint8_t flushCounter = 0;
     if (++flushCounter >= 10) {
         activeFile.flush();
@@ -72,58 +77,61 @@ void writeSample(uint32_t seq, uint32_t now, int steering, int throttle,
     }
 }
 
-// Replace with the trained classifier later. Mode 1 deliberately bypasses ML
-// for data collection; mode 2 logs the result but continues; mode 3 enforces it.
-MinasDecision classifyDriver(bool owner, uint16_t& confidence) {
+uint8_t classifyDriver(bool owner, uint16_t& confidence) {
 #if CONTROLLER_OPERATION_MODE == 1
     confidence = 1000;
-    return MINAS_DECISION_ALLOW_OWNER;
+    return DRIVE_CONTINUE;
 #elif CONTROLLER_OPERATION_MODE == 2
     confidence = owner ? 1000 : 0;
-    return owner ? MINAS_DECISION_ALLOW_OWNER : MINAS_DECISION_STOP;
+    return owner ? DRIVE_CONTINUE : DRIVE_STOP;
 #else
     confidence = owner ? 1000 : 0;
-    return owner ? MINAS_DECISION_ALLOW_OWNER : MINAS_DECISION_STOP;
+    return owner ? DRIVE_CONTINUE : DRIVE_STOP;
 #endif
 }
 
-void sendCommand(int steering, int throttle, MinasDecision decision,
-                 uint16_t confidence, uint32_t now) {
-    AuthorizedVehicleCommand command{};
-    command.magic = MINAS_PROTOCOL_MAGIC;
-    command.version = MINAS_PROTOCOL_VERSION;
-    command.messageType = MINAS_MSG_AUTHORIZED_COMMAND;
-    command.decision = decision;
-    command.allowMotion = decision == MINAS_DECISION_ALLOW_OWNER ? 1 : 0;
-    command.sequence = ++commandSequence;
-    command.inputSequence = inputSequence;
-    command.issuedAtMs = now;
-    command.expiresAtMs = now + COMMAND_TTL_MS;
-    command.steering = constrain(steering, 0, 180);
-    command.throttle = command.allowMotion ? constrain(throttle, 0, 180) : ESC_NEUTRAL_ANGLE;
-    command.confidencePermille = confidence;
-    minasFinalize(command);
-    if (!radioReady) return;
-    const esp_err_t result = esp_now_send(vehicleUnitAddress,
-        reinterpret_cast<const uint8_t*>(&command), sizeof(command));
-    if (result != ESP_OK) Serial.printf("[RADIO] send failed: %d\n", result);
+bool sendMrpPayload(const telemetry_payload_t& payload) {
+    if (!radioReady || awaitingAck) return false;
+
+    uint8_t ciphertext[MRP_MAX_CIPHERTEXT_SIZE] = {};
+    size_t ciphertextLength = 0;
+    if (!mrp.encrypt(reinterpret_cast<const uint8_t*>(&payload), sizeof(payload),
+                     ciphertext, rollingKey, ciphertextLength)) {
+        Serial.println("[MRP] telemetry encryption failed");
+        return false;
+    }
+
+    const esp_err_t result = esp_now_send(vehicleUnitAddress, ciphertext,
+                                          ciphertextLength);
+    if (result != ESP_OK) {
+        Serial.printf("[MRP] send failed: %d\n", result);
+        return false;
+    }
+    awaitingAck = true;
+    return true;
 }
 
-void onDataRecv(const uint8_t*, const uint8_t* data, int len) {
-    if (len != static_cast<int>(sizeof(VehicleTelemetry))) return;
-    VehicleTelemetry packet{};
-    memcpy(&packet, data, sizeof(packet));
-    if (!minasValidate(packet) || packet.messageType != MINAS_MSG_VEHICLE_TELEMETRY) return;
-    latestVehicleTelemetry = packet;
-    lastVehicleTelemetryMs = millis();
+void onDataRecv(const uint8_t* mac, const uint8_t* data, int len) {
+    if (mac == nullptr || data == nullptr || len <= 0 ||
+        memcmp(mac, vehicleUnitAddress, 6) != 0 ||
+        len != static_cast<int>(mrpPaddedLength(sizeof(ack_payload_t)))) return;
+
+    uint8_t plaintext[MRP_MAX_CIPHERTEXT_SIZE] = {};
+    if (!mrp.decrypt(data, static_cast<size_t>(len), plaintext, rollingKey)) return;
+
+    ack_payload_t ack{};
+    memcpy(&ack, plaintext, sizeof(ack));
+    if (ack.magic != MAGIC_NUMBER || ack.receiverCounter < lastAckedCounter) return;
+
+    memcpy(rollingKey, ack.newKey, AES_KEY_SIZE);
+    lastAckedCounter = ack.receiverCounter;
+    awaitingAck = false;
+    lastAckMs = millis();
 }
 
 void processController() {
     const uint32_t now = millis();
-    if (!ps5.isConnected()) {
-        sendCommand(90, ESC_NEUTRAL_ANGLE, MINAS_DECISION_STOP, 0, now);
-        return;
-    }
+    if (!ps5.isConnected()) return;
 
     const bool circle = ps5.Circle();
     if (circle && !previousCircle) {
@@ -147,10 +155,27 @@ void processController() {
     ++inputSequence;
 
     uint16_t confidence = 0;
-    const MinasDecision decision = classifyDriver(ownerLabel, confidence);
-    const bool allow = decision == MINAS_DECISION_ALLOW_OWNER;
-    sendCommand(steering, throttle, decision, confidence, now);
-    writeSample(inputSequence, now, steering, throttle, l2, r2, buttonsMask, decision, confidence, allow);
+    const uint8_t decision = classifyDriver(ownerLabel, confidence);
+    const bool allow = decision == DRIVE_CONTINUE;
+
+    telemetry_payload_t payload{};
+    payload.sequenceNumber = ++commandSequence;
+    payload.timestamp = now;
+    payload.steering = constrain(steering, 0, 180);
+    payload.throttle = allow ? constrain(throttle, 0, 180) : ESC_NEUTRAL_ANGLE;
+    payload.sonarDistance = latestSonarDistance;
+    payload.packetLost = awaitingAck ? 1 : 0;
+    // In collection mode both owner and non-owner trials may drive. In an
+    // enforcement mode this field becomes the classifier's authorization.
+    payload.isOwner = allow ? 1 : 0;
+    payload.deltaTime = TELEMETRY_INTERVAL_MS;
+    payload.steerVelocity = 0.0f;
+    payload.throttleVelocity = 0.0f;
+    payload.magic = MAGIC_NUMBER;
+
+    sendMrpPayload(payload);
+    writeSample(inputSequence, now, steering, throttle, l2, r2, buttonsMask,
+                decision, confidence, allow);
 }
 } // namespace
 
@@ -159,9 +184,8 @@ void setup() {
     delay(500);
     WiFi.mode(WIFI_STA);
     Serial.printf("[ControllerUnit] STA MAC: %s\n", WiFi.macAddress().c_str());
-    // The S3 MAC is intentionally allowed to remain unset while the
-    // Controller Unit is being tested by itself. In that case PS5 + SD
-    // collection continues, but no ESP-NOW command is sent.
+    mrp.deriveKey(MRP_MASTER_SEED, 0, rollingKey);
+
     if (!validMacConfigured()) {
         Serial.println("[WARN] vehicleUnitAddress is not set; PS5/SD local test mode");
     } else if (esp_now_init() != ESP_OK) {
@@ -184,15 +208,13 @@ void setup() {
     if (!sdReady) Serial.println("[WARN] SD unavailable; samples will not be saved");
     if (sdReady) openTrialFile();
 
-    const bool ps5Started = ps5.begin(PS5_CONTROLLER_MAC);
-if (!ps5Started) {
-    Serial.println("[FATAL] PS5 Bluetooth initialization failed");
-    return;
-}
-
-controllerReady = true;
-Serial.println("[PS5] Bluetooth stack initialized; waiting for DualSense connection");
-    Serial.printf("[READY] Controller Unit: PS5 + SD; ESP-NOW=%s\n",
+    if (!ps5.begin(PS5_CONTROLLER_MAC)) {
+        Serial.println("[FATAL] PS5 Bluetooth initialization failed");
+        return;
+    }
+    controllerReady = true;
+    Serial.println("[PS5] Bluetooth stack initialized; waiting for DualSense connection");
+    Serial.printf("[READY] Controller Unit: PS5 + SD + MRP; ESP-NOW=%s\n",
                   radioReady ? "enabled" : "waiting for Vehicle Unit MAC");
 }
 
