@@ -19,6 +19,8 @@
 #define SONAR_TIMEOUT_US 12000
 
 // Replace with the Wi-Fi STA MAC of the WROVER Controller Unit.
-static uint8_t controllerUnitAddress[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+static uint8_t controllerUnitAddress[] = {
+    0xE0, 0x8C, 0xFE, 0x76, 0xD2, 0xD4
+};
 
 #endif
