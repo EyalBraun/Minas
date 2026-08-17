@@ -1,89 +1,116 @@
 # Minas: Owner-Recognition Research Platform
 
-Minas is an embedded research platform for collecting RC-car driving telemetry and later studying whether an authorized owner can be distinguished from other drivers by driving behavior.
+Minas is an embedded research platform for collecting RC-car driving telemetry and studying whether the driving behavior of an authorized owner can be distinguished from that of non-owner drivers.
 
-## Current architecture
+> **Current status:** Minas is a research data-collection prototype. It does not yet contain a trained driver-classification model, production-grade authorization security, or certified vehicle-safety controls.
 
-```text
+## Architecture
+
+```
 PS5 DualSense
       │ Bluetooth Classic
       ▼
 Controller Unit — ESP32-WROVER
-      ├── reads controller input
-      ├── stores trial data on external microSD
-      ├── contains the future ML decision gate
-      └── sends an authorized command over ESP-NOW
+      ├── connects to the PS5 controller
+      ├── reads steering, throttle, triggers and selected buttons
+      ├── stores trial data on an external SPI microSD card
+      ├── provides the future ML decision gate
+      └── sends a command over ESP-NOW
                     │
                     ▼
-Vehicle Unit — ESP32-S3 on the car
-      ├── validates the command and CRC
+Vehicle Unit — ESP32-S3 mounted on the car
+      ├── validates the command and sender MAC
       ├── drives the steering servo and ESC
-      └── returns to neutral on timeout or denied command
+      ├── reports vehicle telemetry
+      └── returns the servo and ESC to neutral on timeout or denial
 ```
 
-The Controller Unit is an original ESP32/WROVER because the selected DualSense library requires Bluetooth Classic. The Vehicle Unit is the ESP32-S3 and does not connect to the controller; it is the actuator and failsafe node on the car.
+The **Controller Unit** uses an original ESP32/WROVER-class board because the selected DualSense library requires Bluetooth Classic. The **Vehicle Unit** uses an ESP32-S3 and does not connect to the PS5 controller.
 
-## Current firmware scope
+## Data-collection workflow
 
-The Controller Unit reads steering, throttle, triggers and selected buttons from the DualSense. It stores samples in separate trial files on an external SPI microSD module. Pressing Circle switches the manually assigned ground-truth label between `owner` and `nonowner` and opens a new trial file.
+The target research label is binary: `owner` versus `nonowner`. The label is manually assigned as ground truth for each trial. It is not cryptographic proof of the driver’s identity.
 
-The current `classifyDriver()` function is a clearly marked placeholder. `CONTROLLER_OPERATION_MODE=1` is a collection bypass, `CONTROLLER_OPERATION_MODE=2` is intended for shadow evaluation, and `CONTROLLER_OPERATION_MODE=3` is intended for future enforcement. This release does not contain a trained ML model.
+The Controller Unit creates a separate CSV trial file for each label interval. Pressing Circle toggles the manually assigned label and opens a new file. One trial should contain one driver, one fixed label and one continuous experimental segment.
 
-The Vehicle Unit never executes a command merely because it arrived from the controller. It accepts only a valid `AuthorizedVehicleCommand` from the configured Controller Unit MAC, rejects old sequences, and returns the servo and ESC to neutral when no fresh command has arrived within the command timeout.
+Example files are:
 
-## Data collection for binary classification
-
-The intended target is a binary label: `owner` versus `nonowner`. The label is manually assigned during data collection and remains fixed for each trial. The CSV contains trial number, sequence, timestamp, steering, throttle, L2/R2 values, button mask, label, decision metadata and Vehicle Unit telemetry.
-
-The rows are intended to be grouped into time windows during offline preprocessing. Train, validation and test splits must be performed by driver and session, not by random individual rows, to avoid leakage between adjacent samples from the same drive.
-
-See `ML_DATASET_ASSESSMENT_HE.md` for the data-quality assessment and recommended evaluation method.
-
-## Hardware prerequisites
-
-The Controller Unit requires an original ESP32/WROVER-class board with Bluetooth Classic, an external SPI microSD module and the DualSense controller. The Vehicle Unit requires the ESP32-S3-DevKitC-1 N16R8 and connections for the steering servo, ESC and optional HC-SR04.
-
-The HC-SR04 Echo line must not be connected directly to an ESP32 GPIO if it can output 5 V. Use a voltage divider or level shifter. Confirm the ESC neutral pulse and all GPIO assignments with the actual hardware before powering the motor.
-
-## Configuration before upload
-
-Print the STA MAC of each board through the serial monitor. Put the ESP32-S3 MAC in `ControllerUnit/include/Config.h` as `vehicleUnitAddress`, and put the WROVER MAC in `VehicleUnit/include/Config.h` as `controllerUnitAddress`. Do not leave either address as all zeros.
-
-The Controller Unit SD defaults are SCK 18, MISO 19, MOSI 23 and CS 5. Change these values if the physical module is wired differently.
-
-## Build
-
-Build the Controller Unit:
-
-```bash
-cd ControllerUnit
-pio run
 ```
-
-Build the Vehicle Unit:
-
-```bash
-cd VehicleUnit
-pio run
-```
-
-The Controller Unit uses the `esp32dev` PlatformIO target because the selected PS5 library requires Bluetooth Classic. The Vehicle Unit uses `esp32-s3-devkitc-1`.
-
-## Data files
-
-The Controller Unit creates files such as:
-
-```text
 /trial_1_owner.csv
 /trial_2_nonowner.csv
 ```
 
-Each file contains metadata followed by rows with the schema:
+Each file contains metadata followed by rows with the following fields:
 
-```text
+```
 trial_number,input_sequence,timestamp_ms,steering,throttle,l2,r2,buttons_mask,owner_label,ml_decision,confidence_permille,allow_motion,vehicle_sonar_cm,vehicle_failsafe
 ```
 
-## Security status
+The data should be transformed into time windows before machine-learning training. Train, validation and test splits must be made by driver and session rather than by random individual rows, otherwise adjacent samples from the same drive can leak between the splits.
 
-`shared/MinasProtocol.h` defines a versioned command format and CRC32 for accidental corruption detection. CRC32 is not authentication. Before using the system as a security or authorization product, add authenticated encryption, key management, replay protection and a tested allowlist. The firmware is not a certified safety system.
+## Machine-learning status
+
+A trained model is not included in the current firmware. The function `classifyDriver()` is a placeholder for a future classifier. In the current firmware, the manually assigned label is ground truth for collection; it must not be described as an ML prediction.
+
+The current controller mode is:
+
+| Mode | Meaning |
+| --- | --- |
+| `1` | Collection bypass. Used to collect labeled data; no trained model is active. |
+| `2` | Reserved for future shadow evaluation. |
+| `3` | Reserved for future enforcement after a real model has been integrated and validated. |
+
+Modes `2` and `3` are not a working ML implementation in this release. Before enforcement is enabled, the placeholder must be replaced with a real model and evaluated on drivers and sessions that were not used for training.
+
+## Hardware requirements
+
+The Controller Unit requires an original ESP32/WROVER-class board with Bluetooth Classic, an external SPI microSD module and a PS5 DualSense controller. The Vehicle Unit requires an ESP32-S3-DevKitC-1 N16R8, a steering servo, an ESC and optionally an HC-SR04 ultrasonic sensor.
+
+The HC-SR04 Echo signal must not be connected directly to an ESP32 GPIO if the sensor can output 5 V. Use a voltage divider or level shifter. The ESP32 boards, servo, ESC and sensor must share a suitable ground, and the BEC voltage must be verified before connecting the battery.
+
+The current firmware does not implement battery monitoring or a Battery Guardian. No battery-protection feature should be claimed unless calibrated hardware and firmware are added and tested.
+
+## Configuration
+
+Before uploading firmware, print the STA MAC of both boards through the serial monitor.
+
+Set the ESP32-S3 MAC in `ControllerUnit/include/Config.h` using `vehicleUnitAddress`. Set the ESP32-WROVER MAC in `VehicleUnit/include/Config.h` using `controllerUnitAddress`. Neither address may remain all zeros.
+
+The default Controller Unit SD wiring is:
+
+| SD signal | ESP32-WROVER GPIO |
+| --- | --- |
+| SCK | 18 |
+| MISO | 19 |
+| MOSI | 23 |
+| CS | 5 |
+
+Change these values in `ControllerUnit/include/Config.h` if the actual wiring is different.
+
+## Build
+
+```bash
+cd ControllerUnit
+pio run
+
+cd ../VehicleUnit
+pio run
+```
+
+The Controller Unit uses the `esp32dev` PlatformIO target because the selected PS5 library requires Bluetooth Classic. The Vehicle Unit uses the `esp32-s3-devkitc-1` target with a 16 MB flash configuration.
+
+## Safety and security limitations
+
+The Vehicle Unit starts with the steering servo centered and the ESC at neutral. It accepts only valid commands from the configured Controller Unit MAC, rejects old sequence numbers and returns to neutral when no fresh command has been received within the local timeout.
+
+These are research-prototype safeguards, not certified safety controls. The current CRC32 detects accidental corruption but is not authentication. The project does not yet provide authenticated encryption, secure key provisioning, complete replay protection or a certified safety mechanism.
+
+Do not connect the motor or apply battery power until the system has passed a bench test with the wheels lifted or the motor mechanically disconnected.
+
+## Project contribution and dependencies
+
+Minas contributes the application-layer integration of controller telemetry, trial labeling, sequence handling, SD logging, ESP-NOW command transfer and the planned driver-authorization interface. Bluetooth, ESP-NOW, AES, SHA-256 and CRC algorithms are established technologies or library components used by the project; Minas does not claim to have invented them.
+
+## Reproducibility
+
+For every collection session, record the board models, firmware revision, PS5 library revision, both STA MAC addresses, SD card format, telemetry interval, wiring revision, route or task, driver label, session identifier and trial number.
