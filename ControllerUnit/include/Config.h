@@ -2,9 +2,10 @@
 #define MINAS_CONTROLLER_CONFIG_H
 
 #include <stdint.h>
-
+#include <"personalConfig">
 // DT: original ESP32/WROVER with PS5 Bluetooth Classic.
-#define PS5_CONTROLLER_MAC "0c:27:56:21:71:6b"
+//Replace with the PS5 controller MAC.
+#define PS5_CONTROLLER_MAC "00:00:00:00::" 
 
 // Replace with the Wi-Fi STA MAC of the ESP32-S3 Vehicle Unit.
 static uint8_t vehicleUnitAddress[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };

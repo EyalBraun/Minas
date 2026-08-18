@@ -1,6 +1,6 @@
 #ifndef MINAS_VEHICLE_CONFIG_H
 #define MINAS_VEHICLE_CONFIG_H
-
+#include <"personalConfig.h">
 // DR: ESP32-S3-DevKitC-1 N16R8 mounted on the car.
 // Verify the actual wiring before connecting the battery or ESC.
 #define SERVO_PIN 25
@@ -20,7 +20,7 @@
 
 // Replace with the Wi-Fi STA MAC of the WROVER Controller Unit.
 static uint8_t controllerUnitAddress[] = {
-    0xE0, 0x8C, 0xFE, 0x76, 0xD2, 0xD4
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
 #endif
