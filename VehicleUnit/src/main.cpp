@@ -13,6 +13,8 @@ uint32_t lastAcceptedSequence = 0;
 uint32_t lastAcceptedCommandMs = 0;
 uint32_t lastReceivedPacketMs = 0;
 uint32_t lastTelemetryMs = 0;
+uint32_t buzzerUntilMs = 0;
+bool neutralState = true;
 int appliedSteering = 90;
 int appliedThrottle = ESC_NEUTRAL_ANGLE;
 int sonarDistanceCm = 999;
@@ -22,11 +24,21 @@ bool validControllerMacConfigured() {
     return false;
 }
 
-void safeNeutral() {
+void safeNeutral(bool announce = true) {
     appliedSteering = 90;
     appliedThrottle = ESC_NEUTRAL_ANGLE;
     steeringServo.write(90);
     throttleESC.write(ESC_NEUTRAL_ANGLE);
+    if (announce && !neutralState) buzzerUntilMs = millis() + 180U;
+    neutralState = true;
+}
+
+void applyMotion(int steering, int throttle) {
+    appliedSteering = constrain(steering, 0, 180);
+    appliedThrottle = constrain(throttle, 0, 180);
+    steeringServo.write(appliedSteering);
+    throttleESC.write(appliedThrottle);
+    neutralState = false;
 }
 
 int readSonarCm() {
@@ -88,13 +100,10 @@ void onDataRecv(const uint8_t* mac, const uint8_t* data, int len) {
     sonarDistanceCm = payload.sonarDistance;
 
     if (payload.isOwner != 1) {
-        safeNeutral();
+        safeNeutral(true);
         return;
     }
-    appliedSteering = constrain(payload.steering, 0, 180);
-    appliedThrottle = constrain(payload.throttle, 0, 180);
-    steeringServo.write(appliedSteering);
-    throttleESC.write(appliedThrottle);
+    applyMotion(payload.steering, payload.throttle);
 }
 
 void setup() {
@@ -102,6 +111,8 @@ void setup() {
     delay(500);
     pinMode(SONAR_TRIG_PIN, OUTPUT);
     pinMode(SONAR_ECHO_PIN, INPUT);
+    pinMode(BUZZER_PIN, OUTPUT);
+    digitalWrite(BUZZER_PIN, LOW);
 
     ESP32PWM::allocateTimer(0);
     ESP32PWM::allocateTimer(1);
@@ -136,8 +147,10 @@ void loop() {
     const uint32_t now = millis();
     if (lastAcceptedCommandMs == 0 ||
         now - lastAcceptedCommandMs > COMMAND_TIMEOUT_MS) {
-        safeNeutral();
+        safeNeutral(true);
     }
+    digitalWrite(BUZZER_PIN, (buzzerUntilMs != 0 && now < buzzerUntilMs) ? HIGH : LOW);
+    if (buzzerUntilMs != 0 && now >= buzzerUntilMs) buzzerUntilMs = 0;
     if (now - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
         lastTelemetryMs = now;
         sonarDistanceCm = readSonarCm();

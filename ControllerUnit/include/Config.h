@@ -36,10 +36,23 @@ static uint8_t vehicleUnitAddress[] = MINAS_VEHICLE_UNIT_ADDRESS;
 #define TELEMETRY_INTERVAL_MS 50
 #define VEHICLE_TELEMETRY_TIMEOUT_MS 500
 #define COMMAND_TTL_MS 180
+#define COMMAND_ACK_TIMEOUT_MS 160
+#define ML_MIN_CONFIDENCE_PERMILLE 700
 
 // 1 = collection bypass, 2 = shadow ML, 3 = enforced ML.
 #define CONTROLLER_OPERATION_MODE 1
 #define INITIAL_OWNER_LABEL 1
+
+// Replace these locally per collection session. They are written into every CSV.
+#ifndef MINAS_SESSION_ID
+#define MINAS_SESSION_ID "session_unknown"
+#endif
+#ifndef MINAS_DRIVER_ID
+#define MINAS_DRIVER_ID "driver_unknown"
+#endif
+#ifndef MINAS_ROUTE_ID
+#define MINAS_ROUTE_ID "route_unknown"
+#endif
 
 #define SD_LOG_PREFIX "/trial_"
 #define ESC_NEUTRAL_ANGLE 90
