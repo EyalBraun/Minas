@@ -102,6 +102,31 @@ Docs/             Protocol and wiring documentation
 - Publish latency, packet-loss, false-accept and false-reject measurements.
 - Document failure behavior and hardware safety assumptions.
 
+## Local hardware configuration
+
+The public repository builds with safe all-zero/example values and does not require personal hardware addresses. For a local hardware setup, copy the appropriate example files:
+
+```shell
+cp ControllerUnit/include/personalConfig.example.h \\
+   ControllerUnit/include/personalConfig.h
+
+cp VehicleUnit/include/personalConfig.example.h \\
+   VehicleUnit/include/personalConfig.h
+```
+
+Edit the local files with your own PS5, Controller Unit and Vehicle Unit addresses. `personalConfig.h` is intentionally ignored by Git and must never be committed. The example files contain only dummy values.
+
+## Build with PlatformIO
+
+From the repository root:
+
+```shell
+pio run --project-dir ControllerUnit
+pio run --project-dir VehicleUnit
+```
+
+The same two builds run automatically in GitHub Actions for pushes to `main` and pull requests. The public CI build uses the safe fallback configuration and does not require personal hardware addresses.
+
 ## License and contribution
 
 This repository is an educational and research project. Contributions should describe the tested hardware, firmware revision, experimental conditions and known limitations. Established technologies such as ESP-NOW, AES, SHA-256 and CRC are used as components; Minas does not claim to have invented them.
