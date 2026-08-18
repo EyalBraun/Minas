@@ -2,16 +2,31 @@
 #define MINAS_CONTROLLER_CONFIG_H
 
 #include <stdint.h>
-#include <"personalConfig">
-// DT: original ESP32/WROVER with PS5 Bluetooth Classic.
-//Replace with the PS5 controller MAC.
-#define PS5_CONTROLLER_MAC "00:00:00:00::" 
 
-// Replace with the Wi-Fi STA MAC of the ESP32-S3 Vehicle Unit.
-static uint8_t vehicleUnitAddress[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+// personalConfig.h is intentionally untracked and exists only on the local
+// development machine. The public repository must build without it.
+#if __has_include("personalConfig.h")
+#  include "personalConfig.h"
+#endif
+
+// Original ESP32/WROVER board with Bluetooth Classic for the DualSense.
+#ifndef MINAS_PS5_CONTROLLER_MAC
+#define MINAS_PS5_CONTROLLER_MAC "00:00:00:00:00:00"
+#endif
+
+#define PS5_CONTROLLER_MAC MINAS_PS5_CONTROLLER_MAC
+
+// Replace this locally with the Wi-Fi STA MAC of the ESP32-S3 Vehicle Unit.
+// All-zero values intentionally keep the Controller Unit in local PS5 + SD
+// test mode and prevent ESP-NOW command transmission.
+#ifndef MINAS_VEHICLE_UNIT_ADDRESS
+#define MINAS_VEHICLE_UNIT_ADDRESS \
+    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }
+#endif
+
+static uint8_t vehicleUnitAddress[] = MINAS_VEHICLE_UNIT_ADDRESS;
 
 // External microSD module connected to the WROVER using SPI.
-// Change these pins to match the actual SD wiring.
 #define SD_SCK_PIN 18
 #define SD_MISO_PIN 19
 #define SD_MOSI_PIN 23

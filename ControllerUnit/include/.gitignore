@@ -1,1 +1,2 @@
+# Local hardware configuration. Never commit real controller or vehicle data.
 personalConfig.h

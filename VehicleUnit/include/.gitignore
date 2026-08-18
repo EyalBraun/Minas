@@ -1,1 +1,2 @@
+# Local hardware configuration. Never commit the real controller MAC.
 personalConfig.h
