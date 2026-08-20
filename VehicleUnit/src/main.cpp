@@ -2,6 +2,7 @@
 #include <ESP32Servo.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 #include "Config.h"
 #include "../../shared/MRP.h"
 
@@ -13,32 +14,22 @@ uint32_t lastAcceptedSequence = 0;
 uint32_t lastAcceptedCommandMs = 0;
 uint32_t lastReceivedPacketMs = 0;
 uint32_t lastTelemetryMs = 0;
-uint32_t buzzerUntilMs = 0;
-bool neutralState = true;
 int appliedSteering = 90;
 int appliedThrottle = ESC_NEUTRAL_ANGLE;
 int sonarDistanceCm = 999;
+bool linkActive = false;
+uint32_t receivedFrameCount = 0;
 
 bool validControllerMacConfigured() {
     for (uint8_t byte : controllerUnitAddress) if (byte != 0x00) return true;
     return false;
 }
 
-void safeNeutral(bool announce = true) {
+void safeNeutral() {
     appliedSteering = 90;
     appliedThrottle = ESC_NEUTRAL_ANGLE;
     steeringServo.write(90);
     throttleESC.write(ESC_NEUTRAL_ANGLE);
-    if (announce && !neutralState) buzzerUntilMs = millis() + 180U;
-    neutralState = true;
-}
-
-void applyMotion(int steering, int throttle) {
-    appliedSteering = constrain(steering, 0, 180);
-    appliedThrottle = constrain(throttle, 0, 180);
-    steeringServo.write(appliedSteering);
-    throttleESC.write(appliedThrottle);
-    neutralState = false;
 }
 
 int readSonarCm() {
@@ -65,20 +56,55 @@ bool sendAck(uint32_t acceptedCounter, const uint8_t nextKey[AES_KEY_SIZE],
         Serial.println("[MRP] ACK encryption failed");
         return false;
     }
-    return esp_now_send(controllerUnitAddress, ciphertext, ciphertextLength) == ESP_OK;
+    const esp_err_t result = esp_now_send(controllerUnitAddress, ciphertext, ciphertextLength);
+    if (result == ESP_OK) {
+        Serial.printf("[MRP] TX ACK counter=%lu\n",
+                      static_cast<unsigned long>(acceptedCounter));
+        return true;
+    }
+    Serial.printf("[MRP] ACK send failed: %d\n", result);
+    return false;
 }
 
 void onDataRecv(const uint8_t* mac, const uint8_t* data, int len) {
-    if (mac == nullptr || data == nullptr ||
-        memcmp(mac, controllerUnitAddress, 6) != 0 ||
-        len != static_cast<int>(mrpPaddedLength(sizeof(telemetry_payload_t)))) return;
+    ++receivedFrameCount;
+    const int expectedLength = static_cast<int>(mrpPaddedLength(sizeof(telemetry_payload_t)));
+
+    if (mac == nullptr || data == nullptr) {
+        Serial.println("[ESP-NOW] RX rejected: null frame");
+        return;
+    }
+
+    if (memcmp(mac, controllerUnitAddress, 6) != 0) {
+        Serial.printf("[ESP-NOW] RX rejected: unexpected sender %02X:%02X:%02X:%02X:%02X:%02X\n",
+                      mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        return;
+    }
+
+    if (len != expectedLength) {
+        Serial.printf("[ESP-NOW] RX rejected: length=%d expected=%d\n", len, expectedLength);
+        return;
+    }
 
     uint8_t plaintext[MRP_MAX_CIPHERTEXT_SIZE] = {};
-    if (!mrp.decrypt(data, static_cast<size_t>(len), plaintext, rollingKey)) return;
+    if (!mrp.decrypt(data, static_cast<size_t>(len), plaintext, rollingKey)) {
+        Serial.println("[MRP] RX rejected: AES decrypt failed");
+        return;
+    }
 
     telemetry_payload_t payload{};
     memcpy(&payload, plaintext, sizeof(payload));
-    if (payload.magic != MAGIC_NUMBER || payload.sequenceNumber <= lastAcceptedSequence) return;
+    if (payload.magic != MAGIC_NUMBER) {
+        Serial.printf("[MRP] RX rejected: bad magic 0x%08lX\n",
+                      static_cast<unsigned long>(payload.magic));
+        return;
+    }
+    if (payload.sequenceNumber <= lastAcceptedSequence) {
+        Serial.printf("[MRP] RX rejected: stale sequence=%lu last=%lu\n",
+                      static_cast<unsigned long>(payload.sequenceNumber),
+                      static_cast<unsigned long>(lastAcceptedSequence));
+        return;
+    }
 
     const uint8_t currentKey[AES_KEY_SIZE] = {
         rollingKey[0], rollingKey[1], rollingKey[2], rollingKey[3],
@@ -94,16 +120,27 @@ void onDataRecv(const uint8_t* mac, const uint8_t* data, int len) {
     if (!sendAck(payload.sequenceNumber, nextKey, currentKey)) return;
     memcpy(rollingKey, nextKey, AES_KEY_SIZE);
 
+    if (!linkActive) {
+        Serial.println("[LINK] Vehicle <-> Controller communication established");
+    }
+    linkActive = true;
+    Serial.printf("[MRP] RX command seq=%lu; packet accepted\n",
+                  static_cast<unsigned long>(payload.sequenceNumber));
+
     lastAcceptedSequence = payload.sequenceNumber;
     lastAcceptedCommandMs = millis();
     lastReceivedPacketMs = lastAcceptedCommandMs;
     sonarDistanceCm = payload.sonarDistance;
 
     if (payload.isOwner != 1) {
-        safeNeutral(true);
+        Serial.println("[SAFETY] Authorization denied; Vehicle is neutral");
+        safeNeutral();
         return;
     }
-    applyMotion(payload.steering, payload.throttle);
+    appliedSteering = constrain(payload.steering, 0, 180);
+    appliedThrottle = constrain(payload.throttle, 0, 180);
+    steeringServo.write(appliedSteering);
+    throttleESC.write(appliedThrottle);
 }
 
 void setup() {
@@ -111,8 +148,6 @@ void setup() {
     delay(500);
     pinMode(SONAR_TRIG_PIN, OUTPUT);
     pinMode(SONAR_ECHO_PIN, INPUT);
-    pinMode(BUZZER_PIN, OUTPUT);
-    digitalWrite(BUZZER_PIN, LOW);
 
     ESP32PWM::allocateTimer(0);
     ESP32PWM::allocateTimer(1);
@@ -122,6 +157,9 @@ void setup() {
 
     mrp.deriveKey(MRP_MASTER_SEED, 0, rollingKey);
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    const esp_err_t channelResult = esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    Serial.printf("[WiFi] ESP-NOW channel=%d set_result=%d\n", ESPNOW_CHANNEL, channelResult);
     Serial.printf("[VehicleUnit] STA MAC: %s\n", WiFi.macAddress().c_str());
     if (!validControllerMacConfigured()) {
         Serial.println("[FATAL] Set controllerUnitAddress to the WROVER STA MAC in Config.h");
@@ -140,6 +178,7 @@ void setup() {
         return;
     }
     esp_now_register_recv_cb(esp_now_recv_cb_t(onDataRecv));
+    Serial.println("[LINK] ESP-NOW peer configured; receiver callback active");
     Serial.println("[READY] ESP32-S3 Vehicle Unit: encrypted Minas MRP actuator");
 }
 
@@ -147,10 +186,12 @@ void loop() {
     const uint32_t now = millis();
     if (lastAcceptedCommandMs == 0 ||
         now - lastAcceptedCommandMs > COMMAND_TIMEOUT_MS) {
-        safeNeutral(true);
+        if (linkActive) {
+            Serial.println("[LINK] Vehicle timeout: Controller communication lost; neutral");
+            linkActive = false;
+        }
+        safeNeutral();
     }
-    digitalWrite(BUZZER_PIN, (buzzerUntilMs != 0 && now < buzzerUntilMs) ? HIGH : LOW);
-    if (buzzerUntilMs != 0 && now >= buzzerUntilMs) buzzerUntilMs = 0;
     if (now - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
         lastTelemetryMs = now;
         sonarDistanceCm = readSonarCm();
