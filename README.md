@@ -1,14 +1,9 @@
-# Minas WROVER Driver-Recognition Data Collector
+ # Minas WROVER Driver-Recognition Data Collector
 
 ## 📌 What does this do?
 This project turns an ESP32-WROVER into a data logger for an RC car. You drive the car using a PS5 controller, and the system records your specific driving habits (joystick movements, throttle, braking, and sonar distance) to a microSD card. 
 
 The ultimate goal of this final project is to use this logged data to train a Machine Learning model that can automatically recognize who is driving the car (e.g., the car's owner vs. a guest) based entirely on their driving style. 
-
-## ⚠️ Important Safety Warnings
-* **First Runs:** Always perform your initial tests with the car's wheels lifted off the ground and the drive motor disconnected. 
-* **Wiring Danger:** Never connect the 5V Sonar ECHO pin directly to the ESP32. You must use a voltage divider (1kΩ and 2kΩ resistors) to step it down to a safe 3.3V, or you will fry the board.
-
 ## 🛠️ Hardware Requirements
 * **Brain:** ESP32-WROVER board (with an onboard microSD slot)
 * **Controller:** Sony PS5 DualSense 
