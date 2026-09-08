@@ -136,6 +136,7 @@ def windows_for_trial(path: Path, size: int, stride: int) -> List[Dict[str, Any]
         end_ts = parse_float(chunk[-1], "timestamp_ms", parse_float(chunk[-1], "elapsed_ms", 0.0))
 
         record: Dict[str, Any] = {
+            "window_id": f"{path.stem}_w{len(result):04d}",
             "source_segment": path.name,
             "label": label,
             "is_owner": int(label == "owner"),

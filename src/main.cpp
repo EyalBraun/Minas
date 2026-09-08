@@ -168,7 +168,12 @@ void cancelTrial() {
  * @return True if the file was created and initialized successfully; false otherwise.
  */
 bool openTrial(bool owner) {
-    if (!sdReady || trialActive) return false;
+    if (trialActive) return false;
+    if (!sdReady) {
+        Serial.println("[SD] ERROR: Cannot start trial - MicroSD card is not ready or failed to mount!");
+        tone(BUZZER_PIN, 500, 400); // Low warning buzz
+        return false;
+    }
 
     ownerLabel = owner;
     trialNumber = nextSegmentNumber();
@@ -402,6 +407,12 @@ void setup() {
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
 
+    // Allocate all 4 hardware LEDC timers for PWM (prevents conflicts between Servo, ESC, and tone)
+    ESP32PWM::allocateTimer(0);
+    ESP32PWM::allocateTimer(1);
+    ESP32PWM::allocateTimer(2);
+    ESP32PWM::allocateTimer(3);
+
     // Attach Servo and ESC to PWM channels and enforce neutral failsafe immediately
     steeringServo.setPeriodHertz(50);
     steeringServo.attach(STEERING_SERVO_PIN, 500, 2500);
@@ -419,6 +430,12 @@ void setup() {
         sdReady = SD_MMC.exists(SD_LOG_DIRECTORY);
         Serial.printf("[SD] Ready=%s; Log directory: %s\n",
             sdReady ? "true" : "false", SD_LOG_DIRECTORY);
+    }
+
+    // Check if controller MAC address is still using default dummy value
+    if (strcmp(PS5_CONTROLLER_MAC, "00:00:00:00:00:00") == 0) {
+        Serial.println("[PS5] WARNING: PS5_CONTROLLER_MAC in Config.h is set to '00:00:00:00:00:00'.");
+        Serial.println("[PS5] Please update PS5_CONTROLLER_MAC with your controller's Bluetooth MAC address!");
     }
 
     // Initialize PS5 Bluetooth Classic stack
