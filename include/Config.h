@@ -14,7 +14,7 @@
 // 1. BLUETOOTH & CONTROLLER CONFIGURATION
 // ----------------------------------------------------------------------------
 // Bluetooth MAC address of the paired Sony PS5 DualSense controller.
-// Replace with the unique MAC address of your specific controller.
+
 #define PS5_CONTROLLER_MAC "0c:27:56:21:71:6"
 
 // ----------------------------------------------------------------------------
