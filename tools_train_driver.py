@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-MINAS WROVER DRIVER-RECOGNITION FEATURE EXTRACTION & WINDOWING PIPELINE
+MINAS WROVER DRIVER-RECOGNITION FEATURE EXTRACTION & DATASET SPLITTER
 ===============================================================================
 
-This script prepares Minas ESP32-WROVER trial logs for biometric driver-identification
-machine learning models (e.g., Random Forest, XGBoost, LightGBM, SVM, MLP).
+This script prepares Minas ESP32-WROVER 10-minute trial logs (without sonar)
+for biometric driver-identification machine learning models.
 
 Key Pipeline Steps:
-1. Parse raw 20 Hz trial CSV files and extract self-describing metadata headers.
-2. Segment continuous time-series into overlapping sliding windows (default 40 samples ≈ 2s).
-3. Compute summary statistics (mean, std, min, max) across 13 numeric control & sensor metrics.
-4. Calculate data quality ratios (sonar validity ratio, controller connectivity ratio).
-5. Perform a segment-based, class-stratified train/test split (preventing intra-session leakage).
-6. Export the processed feature datasets as tabular CSV files (windows_train.csv & windows_test.csv).
-7. Generate a comprehensive JSON audit report (collection_report.json).
+1. Validates that the input dataset contains the required completed trial files.
+2. Performs a class-stratified random split:
+   - Holds out 4 balanced complete trial files (2 owner, 2 nonowner) for testing.
+   - Assigns the remaining 12 complete trial files (6 owner, 6 nonowner) for training.
+3. Copies raw trial files into dedicated 'train_raw' and 'test_raw' directories.
+4. Segments continuous 20 Hz time-series into fixed sliding windows (default: 40 samples ≈ 2s).
+5. Computes statistical features (mean, std, min, max) across 12 numeric actuator & controller metrics.
+6. Exports feature tables as tabular CSV files (train_window/windows.csv and test_window/windows.csv).
+7. Generates an experiment audit report (split_report.json).
 """
 from __future__ import annotations
 
@@ -22,299 +24,296 @@ import argparse
 import csv
 import json
 import math
+import random
+import shutil
 from pathlib import Path
 from statistics import mean, pstdev
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
-# The 13 numerical columns extracted from the 20 Hz vehicle telemetry
+# The 12 numeric features extracted from the 20 Hz vehicle telemetry (sonar excluded)
 NUMERIC_COLUMNS: List[str] = [
-    "raw_lx",                 # Left stick X (-128 to 127) - steering input
-    "raw_ly",                 # Left stick Y (-128 to 127)
-    "raw_rx",                 # Right stick X (-128 to 127)
-    "raw_ry",                 # Right stick Y (-128 to 127)
-    "l2",                     # Brake / reverse trigger pressure (0 to 255)
-    "r2",                     # Throttle trigger pressure (0 to 255)
-    "steering_deg",           # Calculated steering angle (0° to 180°)
-    "throttle_percent",       # Signed throttle percentage (-100% to +100%)
-    "steering_command_deg",   # Constrained steering command sent to servo
-    "esc_command_us",         # ESC pulse width command (1000 µs - 2000 µs)
-    "steering_delta",         # Rate of change of steering angle
-    "throttle_delta",         # Rate of change of throttle percentage
-    "sonar_distance_cm",      # Obstacle distance from HC-SR04 sonar
+    "raw_lx",                 # Left stick horizontal axis (-128 to 127) - steering
+    "raw_ly",                 # Left stick vertical axis (-128 to 127)
+    "raw_rx",                 # Right stick horizontal axis (-128 to 127)
+    "raw_ry",                 # Right stick vertical axis (-128 to 127)
+    "l2",                     # Left analog trigger (0 to 255) - brake / reverse
+    "r2",                     # Right analog trigger (0 to 255) - throttle
+    "steering_deg",           # Normalized steering intent angle (0° to 180°, center 90°)
+    "throttle_percent",       # Normalized signed throttle percentage (-100% to +100%)
+    "steering_command_deg",   # Constrained angle command sent to steering servo
+    "esc_command_us",         # Actuator command pulse width sent to ESC (1000 to 2000 µs)
+    "steering_delta",         # Rate of change of steering angle (first derivative)
+    "throttle_delta",         # Rate of change of throttle percentage (first derivative)
 ]
 
 
 def read_trial(path: Path) -> Tuple[Dict[str, str], List[Dict[str, str]]]:
     """
-    Parse a single trial CSV file into metadata dictionary and data rows.
+    Parse a single trial CSV file into a metadata dictionary and telemetry rows.
 
-    The file format consists of:
-    1. Key-value metadata lines (e.g. 'schema_version=1', 'label=owner')
-    2. A delimiter line '---'
-    3. Standard CSV header and data rows at 20 Hz.
+    The file structure comprises:
+    1. Key-value metadata lines (e.g. 'schema_version=3', 'label=owner').
+    2. A delimiter line '---'.
+    3. Standard CSV header followed by 20 Hz sample rows.
+    Also transparently supports standard CSV files without metadata preamble.
     """
     metadata: Dict[str, str] = {}
     rows: List[Dict[str, str]] = []
 
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.reader(handle)
-        header = None
+        header: List[str] | None = None
         for fields in reader:
             if not fields:
                 continue
 
-            first_field = fields[0].strip()
-            if header is None and len(fields) == 1 and "=" in first_field:
-                key, value = first_field.split("=", 1)
+            first = fields[0].strip()
+            if header is None and len(fields) == 1 and "=" in first:
+                key, value = first.split("=", 1)
                 metadata[key.strip()] = value.strip()
-            elif first_field == "---":
+            elif first == "---":
                 header_line = next(reader, None)
                 if header_line:
-                    header = [h.strip() for h in header_line]
-            elif header is not None:
-                row = dict(zip(header, [f.strip() for f in fields]))
-                if row.get("timestamp_ms") and row.get("sample_sequence"):
-                    rows.append(row)
+                    header = [item.strip() for item in header_line]
+            elif header is None and any(col in fields for col in ["segment_number", "sample_sequence", "raw_lx", "steering_deg", "timestamp_ms"]):
+                header = [item.strip() for item in fields]
+            elif header is not None and len(fields) == len(header):
+                row = dict(zip(header, (item.strip() for item in fields)))
+                rows.append(row)
 
     return metadata, rows
 
 
+def determine_label(path: Path, metadata: Dict[str, str], rows: List[Dict[str, str]]) -> str:
+    """
+    Resolve whether a trial belongs to 'owner' or 'nonowner'.
+
+    Checks in priority order:
+    1. File metadata block ('label=owner' / 'label=nonowner')
+    2. CSV data rows ('label' column)
+    3. File name ('nonowner' substring vs 'owner' substring)
+    """
+    if metadata.get("label") in {"owner", "nonowner"}:
+        return metadata["label"]
+    if rows and rows[0].get("label") in {"owner", "nonowner"}:
+        return rows[0]["label"]
+    name_lower = path.name.lower()
+    if "nonowner" in name_lower:
+        return "nonowner"
+    if "owner" in name_lower:
+        return "owner"
+    return "owner"
+
+
 def parse_float(row: Dict[str, str], key: str, default: float = 0.0) -> float:
-    """Safely parse a numerical string into a finite float, returning default on failure."""
+    """Safely convert a CSV value to a finite float, returning default on invalid input."""
     try:
-        val = float(row.get(key, default))
-        return val if math.isfinite(val) else default
+        value = float(row.get(key, default))
+        return value if math.isfinite(value) else default
     except (TypeError, ValueError):
         return default
 
 
-def make_windows(
-    rows: List[Dict[str, str]],
-    size: int,
-    stride: int,
-    path: Path,
-    metadata: Dict[str, str],
-    start_window_index: int = 0
-) -> List[Dict[str, Any]]:
+def windows_for_trial(path: Path, size: int, stride: int) -> List[Dict[str, Any]]:
     """
-    Construct fixed-length sliding windows from continuous trial samples.
+    Construct sliding time-series windows and extract summary features from a single trial.
 
-    Each window is converted into a flat feature record with:
-    - Window identifiers (segment, timestamps, duration, sample count)
-    - Ground-truth identity (label, is_owner)
-    - Summary statistics (mean, std, min, max) for each numerical feature
-    - Contextual and data-quality ratios
+    For each window of length `size` samples:
+    - Extracts window temporal bounds (start, end, duration, sample count).
+    - Computes mean, population standard deviation, minimum, and maximum for each numeric column.
+    - Computes controller connection ratio.
     """
-    windows: List[Dict[str, Any]] = []
-    window_counter = start_window_index
+    metadata, rows = read_trial(path)
+    if len(rows) < size:
+        return []
 
-    label = metadata.get("label")
-    if not label:
-        label = "owner" if path.name.startswith("owner_segment_") else "nonowner"
-    is_owner = 1 if label == "owner" else 0
+    label = determine_label(path, metadata, rows)
 
+    result: List[Dict[str, Any]] = []
     for start in range(0, len(rows) - size + 1, stride):
         chunk = rows[start:start + size]
-        if not chunk:
-            continue
-
-        start_ts = parse_float(chunk[0], "timestamp_ms")
-        end_ts = parse_float(chunk[-1], "timestamp_ms")
+        start_ts = parse_float(chunk[0], "timestamp_ms", parse_float(chunk[0], "elapsed_ms", 0.0))
+        end_ts = parse_float(chunk[-1], "timestamp_ms", parse_float(chunk[-1], "elapsed_ms", 0.0))
 
         record: Dict[str, Any] = {
-            "window_id": window_counter,
             "source_segment": path.name,
             "label": label,
-            "is_owner": is_owner,
+            "is_owner": int(label == "owner"),
             "start_timestamp_ms": start_ts,
             "end_timestamp_ms": end_ts,
             "duration_ms": max(0.0, end_ts - start_ts),
             "sample_count": len(chunk),
         }
-        window_counter += 1
 
         for column in NUMERIC_COLUMNS:
-            default_val = -1.0 if column == "sonar_distance_cm" else 0.0
-            values = [parse_float(row, column, default_val) for row in chunk]
+            values = [parse_float(row, column) for row in chunk]
             record[f"{column}_mean"] = round(mean(values), 4)
-            record[f"{column}_std"] = round(pstdev(values) if len(values) > 1 else 0.0, 4)
+            record[f"{column}_std"] = round(pstdev(values), 4) if len(values) > 1 else 0.0
             record[f"{column}_min"] = round(min(values), 4)
             record[f"{column}_max"] = round(max(values), 4)
 
-        valid_sonar = [parse_float(row, "sonar_valid") for row in chunk]
-        connected = [parse_float(row, "controller_connected", 1.0) for row in chunk]
+        record["controller_connected_ratio"] = round(
+            mean(parse_float(row, "controller_connected", 1.0) for row in chunk), 4
+        )
+        result.append(record)
 
-        record["sonar_valid_ratio"] = round(mean(valid_sonar), 4) if valid_sonar else 0.0
-        record["controller_connected_ratio"] = round(mean(connected), 4) if connected else 0.0
-
-        windows.append(record)
-
-    return windows
+    return result
 
 
-def write_csv(path: Path, records: List[Dict[str, Any]]) -> None:
-    """Write list of feature records into a flat tabular CSV file."""
-    if not records:
-        return
-    fieldnames = list(records[0].keys())
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+def write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
+    """Write list of window feature dictionaries into a tabular CSV file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fields = list(rows[0].keys()) if rows else ["source_segment", "label", "is_owner"]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        writer.writerows(records)
+        writer.writerows(rows)
 
 
-def stratified_split_by_segment(
-    windows_by_file: Dict[str, List[Dict[str, Any]]],
-    labels_by_file: Dict[str, str],
-    test_ratio: float = 0.25
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str], List[str]]:
+def choose_test_files(
+    files: List[Path],
+    count: int,
+    seed: int,
+    enforce_count: bool = True
+) -> List[Path]:
     """
-    Perform a class-stratified split by complete segment files.
+    Select held-out test segment files using class-stratified balanced random sampling.
 
-    Entire segment files are held out together to prevent temporal leakage.
-    Segments are grouped by class (owner vs nonowner) and held out
-    proportionally, ensuring BOTH classes are represented in train and test.
+    Ensures that both classes ('owner' and 'nonowner') are proportionally represented
+    in both the training and testing sets. Whole files are held out to prevent
+    temporal data leakage between adjacent sliding windows.
     """
-    train_windows: List[Dict[str, Any]] = []
-    test_windows: List[Dict[str, Any]] = []
-    held_out_files: List[str] = []
-    train_files: List[str] = []
+    if enforce_count and len(files) != 16:
+        raise ValueError(
+            f"Expected exactly 16 complete trial CSV files, but received {len(files)}. "
+            "Use --allow-any-count to bypass this check during testing."
+        )
 
-    files_by_label: Dict[str, List[str]] = {}
-    for filename, label in labels_by_file.items():
-        files_by_label.setdefault(label, []).append(filename)
+    rng = random.Random(seed)
+    labels: Dict[Path, str] = {}
+    for path in files:
+        metadata, rows = read_trial(path)
+        labels[path] = determine_label(path, metadata, rows)
 
-    for label, files in sorted(files_by_label.items()):
-        files = sorted(files)
-        num_files = len(files)
-        num_test = max(1, int(round(num_files * test_ratio))) if num_files > 1 else 0
+    owner_files = sorted([p for p in files if labels[p] == "owner"])
+    nonowner_files = sorted([p for p in files if labels[p] == "nonowner"])
 
-        test_subset = set(files[-num_test:]) if num_test > 0 else set()
-        for f in files:
-            if f in test_subset:
-                held_out_files.append(f)
-                test_windows.extend(windows_by_file[f])
-            else:
-                train_files.append(f)
-                train_windows.extend(windows_by_file[f])
+    if not owner_files or not nonowner_files:
+        raise ValueError(f"Dataset must contain both 'owner' and 'nonowner' files. Found: {set(labels.values())}")
 
-    return train_windows, test_windows, train_files, held_out_files
+    # Stratified split: allocate half the test slots to owner, half to nonowner
+    num_test_owner = max(1, count // 2) if len(owner_files) > 1 else len(owner_files)
+    num_test_nonowner = max(1, count - num_test_owner) if len(nonowner_files) > 1 else len(nonowner_files)
+
+    test_owner = rng.sample(owner_files, min(num_test_owner, len(owner_files)))
+    test_nonowner = rng.sample(nonowner_files, min(num_test_nonowner, len(nonowner_files)))
+
+    selected = sorted(test_owner + test_nonowner)
+    return selected
+
+
+def copy_files(files: Iterable[Path], destination: Path) -> None:
+    """Copy an iterable of files into the destination directory."""
+    destination.mkdir(parents=True, exist_ok=True)
+    for path in files:
+        shutil.copy2(path, destination / path.name)
+
+
+def process_directory(source: Path, destination: Path, window: int, stride: int) -> List[Dict[str, Any]]:
+    """Process all CSV trials in a folder and write the aggregated windows to windows.csv."""
+    all_windows: List[Dict[str, Any]] = []
+    for path in sorted(source.glob("*.csv")):
+        all_windows.extend(windows_for_trial(path, window, stride))
+    write_csv(destination / "windows.csv", all_windows)
+    return all_windows
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Extract statistical features from Minas WROVER vehicle logs into CSV windows."
+        description="Prepare Minas 16-file 10-minute trial dataset (without sonar) for machine learning."
     )
     parser.add_argument(
-        "--data-dir", required=True, type=Path,
-        help="Path to folder containing exported segment CSV files from the SD card."
+        "--data-dir", type=Path, required=True,
+        help="Path to folder containing completed 10-minute trial CSV files from SD card."
     )
     parser.add_argument(
-        "--out-dir", required=True, type=Path,
-        help="Output directory where windows_train.csv and windows_test.csv will be saved."
+        "--out-dir", type=Path, required=True,
+        help="Output directory for train_raw, test_raw, train_window, and test_window."
     )
     parser.add_argument(
         "--window", type=int, default=40,
-        help="Number of samples per window (default: 40 samples ≈ 2.0 seconds at 20 Hz)."
+        help="Number of samples per sliding window (default: 40 samples ~ 2.0 seconds at 20 Hz)."
     )
     parser.add_argument(
         "--stride", type=int, default=10,
-        help="Sliding window stride in samples (default: 10 samples ≈ 0.5 seconds)."
+        help="Sliding window stride in samples (default: 10 samples ~ 0.5 seconds)."
     )
     parser.add_argument(
-        "--test-ratio", type=float, default=0.25,
-        help="Fraction of segment files to reserve for the test set (default: 0.25 = 25%)."
+        "--seed", type=int, default=20260908,
+        help="Random seed for reproducible stratified train/test split."
+    )
+    parser.add_argument(
+        "--allow-any-count", action="store_true",
+        help="Allow dataset with file count other than 16 (useful during development/testing)."
     )
 
     args = parser.parse_args()
     if args.window <= 0 or args.stride <= 0:
-        raise SystemExit("Error: --window and --stride must be positive integers.")
+        parser.error("--window and --stride must be positive integers.")
 
-    all_files = sorted(args.data_dir.rglob("*.csv"))
-    if not all_files:
+    files = sorted(args.data_dir.glob("*.csv"))
+    if not files:
         raise SystemExit(f"No CSV files found in {args.data_dir}")
 
-    windows_by_file: Dict[str, List[Dict[str, Any]]] = {}
-    labels_by_file: Dict[str, str] = {}
-    file_reports: List[Dict[str, Any]] = []
-    global_window_index = 0
-
-    for path in all_files:
-        metadata, rows = read_trial(path)
-        if not rows:
-            continue
-
-        windows = make_windows(
-            rows,
-            size=args.window,
-            stride=args.stride,
-            path=path,
-            metadata=metadata,
-            start_window_index=global_window_index
-        )
-        if not windows:
-            continue
-
-        global_window_index += len(windows)
-        windows_by_file[path.name] = windows
-        label = windows[0]["label"]
-        labels_by_file[path.name] = label
-
-        file_reports.append({
-            "file": path.name,
-            "label": label,
-            "rows": len(rows),
-            "windows": len(windows),
-            "metadata": metadata
-        })
-
-    if not windows_by_file:
-        raise SystemExit("No valid time windows could be created. Ensure files have enough samples.")
-
-    labels_present = set(labels_by_file.values())
-    print(f"[INFO] Processed {len(windows_by_file)} segments across classes: {labels_present}")
-
-    train_windows, test_windows, train_files, test_files = stratified_split_by_segment(
-        windows_by_file, labels_by_file, test_ratio=args.test_ratio
+    test_files = choose_test_files(
+        files, count=4, seed=args.seed, enforce_count=not args.allow_any_count
     )
+    test_set = set(test_files)
+    train_files = [path for path in files if path not in test_set]
 
-    args.out_dir.mkdir(parents=True, exist_ok=True)
+    # Establish target output directory paths
+    train_raw = args.out_dir / "train_raw"
+    test_raw = args.out_dir / "test_raw"
+    train_window = args.out_dir / "train_window"
+    test_window = args.out_dir / "test_window"
 
-    train_csv_path = args.out_dir / "windows_train.csv"
-    test_csv_path = args.out_dir / "windows_test.csv"
-    write_csv(train_csv_path, train_windows)
-    write_csv(test_csv_path, test_windows)
+    for directory in (train_raw, test_raw, train_window, test_window):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    # Copy raw trial splits
+    copy_files(train_files, train_raw)
+    copy_files(test_files, test_raw)
+
+    # Process sliding windows into tabular CSV
+    train_windows = process_directory(train_raw, train_window, args.window, args.stride)
+    test_windows = process_directory(test_raw, test_window, args.window, args.stride)
 
     report = {
         "dataset_summary": {
-            "total_segments": len(windows_by_file),
-            "total_train_windows": len(train_windows),
-            "total_test_windows": len(test_windows),
-            "labels": sorted(labels_present),
+            "total_files": len(files),
+            "train_files": [path.name for path in train_files],
+            "test_files": [path.name for path in test_files],
+            "train_windows": len(train_windows),
+            "test_windows": len(test_windows),
             "window_size_samples": args.window,
             "window_size_seconds": round(args.window * 0.05, 2),
             "stride_samples": args.stride,
             "stride_seconds": round(args.stride * 0.05, 2),
-        },
-        "segment_split": {
-            "training_files": train_files,
-            "held_out_test_files": test_files,
-        },
-        "files_detail": file_reports,
-        "notes": [
-            "Features are summarized per fixed sliding window.",
-            "Complete segment files are held out to prevent temporal autocorrelation leakage.",
-            "Use windows_train.csv and windows_test.csv directly in Pandas/Scikit-learn/PyTorch.",
-        ],
+            "random_seed": args.seed,
+            "features": NUMERIC_COLUMNS,
+            "note": "Controller and actuator features only (sonar excluded).",
+        }
     }
 
-    report_path = args.out_dir / "collection_report.json"
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    report_path = args.out_dir / "split_report.json"
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    print("\n[SUCCESS] Feature processing complete:")
-    print(f"  - Training windows CSV: {train_csv_path} ({len(train_windows)} rows)")
-    print(f"  - Testing windows CSV:  {test_csv_path} ({len(test_windows)} rows)")
-    print(f"  - Audit Report:         {report_path}")
+    print("\n[SUCCESS] Minas data preparation complete:")
+    print(f"  - Train Raw:    {train_raw} ({len(train_files)} files)")
+    print(f"  - Test Raw:     {test_raw} ({len(test_files)} files)")
+    print(f"  - Train Window: {train_window / 'windows.csv'} ({len(train_windows)} windows)")
+    print(f"  - Test Window:  {test_window / 'windows.csv'} ({len(test_windows)} windows)")
+    print(f"  - Split Report: {report_path}")
 
 
 if __name__ == "__main__":

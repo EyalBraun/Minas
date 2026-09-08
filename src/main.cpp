@@ -5,9 +5,13 @@
 #include <ps5Controller.h>
 #include "Config.h"
 
-// Fallback firmware version tag if not supplied via build_flags in platformio.ini
-#ifndef MINAS_FW_VERSION
-#define MINAS_FW_VERSION "wrover-driver-collection-v1"
+// Ensure FIRMWARE_VERSION is always defined even if build flags vary
+#ifndef FIRMWARE_VERSION
+#ifdef MINAS_FW_VERSION
+#define FIRMWARE_VERSION MINAS_FW_VERSION
+#else
+#define FIRMWARE_VERSION "minas-10min-no-sonar-v3"
+#endif
 #endif
 
 namespace {
@@ -15,61 +19,38 @@ namespace {
 // ============================================================================
 // HARDWARE OBJECTS & EXPERIMENTAL STATE
 // ============================================================================
-Servo steeringServo;      // Steering actuator (ESP32 PWM channel)
-Servo esc;                // Traction motor Electronic Speed Controller (ESP32 PWM channel)
-File trialFile;           // Open CSV trial file handle on MicroSD card
+Servo steeringServo;  // Steering actuator PWM driver instance
+Servo esc;            // Motor Electronic Speed Controller PWM driver instance
+File trialFile;       // Active CSV trial log file on the MicroSD card
 
-bool sdReady = false;                           // True when MicroSD card and log directory are mounted
-bool trialActive = false;                       // True while an active logging segment is being recorded
-bool ownerLabel = (INITIAL_OWNER_LABEL != 0);   // Binary label: true = owner, false = nonowner
-bool previousCircle = false;                    // Edge detection for PS5 Circle button
-bool previousCross = false;                     // Edge detection for PS5 Cross button
+bool sdReady = false;             // True when MicroSD card and /trials directory are available
+bool trialActive = false;         // True while a 10-minute trial segment is being recorded
+bool ownerLabel = false;          // True for 'owner' segment, false for 'nonowner' segment
 
-uint32_t sampleSequence = 0;                    // Monotonic sample index within the current segment file
-uint32_t trialNumber = 0;                       // Globally ascending segment number across trials
-uint32_t samplesSinceFlush = 0;                 // Counter for periodic SD card flushing
-uint32_t lastSampleMs = 0;                      // Timestamp of last 20 Hz control/logging iteration
-uint32_t trialStartMs = 0;                      // Timestamp (millis) when current segment file was opened
-uint32_t lastSonarMs = 0;                       // Timestamp of last ultrasonic sonar ping
-int sonarDistanceCm = -1;                       // Current measured distance in cm (-1 = invalid/timeout)
-String trialPath;                               // Absolute path of the active CSV file on MicroSD
+uint32_t trialNumber = 0;         // Ascending global segment counter across sessions
+uint32_t sampleSequence = 0;      // Monotonic sample sequence number within the active trial
+uint32_t samplesSinceFlush = 0;   // Counter for periodic SD card buffer flushes
+uint32_t trialStartMs = 0;        // Timestamp (millis) when current segment started
+uint32_t lastSampleMs = 0;        // Timestamp (millis) of the previous 20 Hz control loop iteration
 
-float previousSteering = STEERING_CENTER_DEG;   // Previous steering angle (used to calculate steering_delta)
-float previousThrottle = 0.0f;                  // Previous throttle percentage (used to calculate throttle_delta)
+String trialPath;                 // Full path to the active trial file (e.g. "/trials/owner_segment_00001.csv")
 
-// ============================================================================
-// ULTRASONIC SENSOR SUBSYSTEM (HC-SR04)
-// ============================================================================
-/**
- * @brief Trigger an ultrasonic pulse and measure return echo duration.
- * @return Distance in centimeters (2-450 cm), or -1 if no valid echo returned.
- *
- * Physics notes:
- * - Speed of sound in dry air at 20°C is ~343 m/s = 0.0343 cm/µs.
- * - Distance = (Duration * 0.0343) / 2 = Duration / 58.3 µs.
- * - Pulse timeout of 25 ms caps maximum range to ~430 cm and avoids long blocking delays.
- */
-int readSonarCm() {
-    digitalWrite(SONAR_TRIG_PIN, LOW);
-    delayMicroseconds(2);
-    digitalWrite(SONAR_TRIG_PIN, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(SONAR_TRIG_PIN, LOW);
+float previousSteering = STEERING_CENTER_DEG;  // Prior steering angle (used to compute steering_delta)
+float previousThrottle = 0.0f;                 // Prior throttle percentage (used to compute throttle_delta)
 
-    const unsigned long duration = pulseIn(SONAR_ECHO_PIN, HIGH, SONAR_TIMEOUT_US);
-    if (duration == 0) return -1; // Echo timed out (no obstacle within range)
-
-    const int centimeters = static_cast<int>(duration / 58UL);
-    return (centimeters >= 2 && centimeters <= 450) ? centimeters : -1;
-}
+bool previousCircle = false;      // Previous state of PS5 Circle button (for edge detection)
+bool previousSquare = false;      // Previous state of PS5 Square button (for edge detection)
+bool previousCross = false;       // Previous state of PS5 Cross button (for edge detection)
 
 // ============================================================================
 // ACTUATOR & FAILSAFE SUBSYSTEM
 // ============================================================================
 /**
- * @brief Apply safe neutral positions to both actuators.
- * Centered steering (90°) and neutral throttle pulse (1500 µs).
- * Called during startup, controller disconnection, trial stops, and SD errors.
+ * @brief Enforces safe neutral positions on both actuators.
+ *
+ * Centers the front steering wheels (90 degrees) and commands the ESC to its
+ * neutral pulse width (1500 microseconds). Called during boot, segment finalization,
+ * segment cancellation, controller disconnection, and I/O error states.
  */
 void applyFailsafe() {
     steeringServo.write(STEERING_CENTER_DEG);
@@ -77,10 +58,15 @@ void applyFailsafe() {
 }
 
 /**
- * @brief Map signed throttle percentage (-100% to +100%) to ESC pulse width (µs).
- * -100% maps to ESC_MIN_US (1000 µs - full reverse / brake).
- *     0% maps to ESC_NEUTRAL_US (1500 µs - stop / neutral).
- * +100% maps to ESC_MAX_US (2000 µs - full forward).
+ * @brief Maps a signed throttle percentage (-100% to +100%) to ESC pulse width (µs).
+ *
+ * Linear piecewise transformation:
+ * - Negative values (-100% to 0%) map to reverse/braking (1000 µs to 1500 µs).
+ * - Zero (0%) maps to neutral stop (1500 µs).
+ * - Positive values (0% to +100%) map to forward acceleration (1500 µs to 2000 µs).
+ *
+ * @param throttlePercent Signed throttle value from -100.0 to +100.0.
+ * @return Pulse width in microseconds constrained between ESC_MIN_US and ESC_MAX_US.
  */
 int throttleToPulse(float throttlePercent) {
     throttlePercent = constrain(throttlePercent, -100.0f, 100.0f);
@@ -94,101 +80,148 @@ int throttleToPulse(float throttlePercent) {
 // MICROSD LOGGING SUBSYSTEM
 // ============================================================================
 /**
- * @brief Safely flush and close the currently active trial CSV file.
- */
-void closeTrial() {
-    if (!trialFile) return;
-    trialFile.flush();
-    trialFile.close();
-    trialActive = false;
-    applyFailsafe();
-    Serial.printf("[TRIAL] Closed %s\n", trialPath.c_str());
-}
-
-/**
- * @brief Determine the next available global segment sequence number.
- * Scans existing files in SD_LOG_DIRECTORY to find the maximum segment number
- * so numbering continuously increases across owner / nonowner switches.
+ * @brief Scans the SD card log directory to find the next sequential segment number.
+ *
+ * Reads existing filenames in SD_LOG_DIRECTORY matching "*segment_XXXXX.csv"
+ * and returns the maximum observed index plus one. Ensures continuous numbering
+ * across owner/nonowner sessions and reboots without overwriting existing files.
+ *
+ * @return The next available global segment sequence number (starting at 1).
  */
 uint32_t nextSegmentNumber() {
     uint32_t highest = 0;
     File dir = SD_MMC.open(SD_LOG_DIRECTORY);
-    if (dir && dir.isDirectory()) {
-        File file = dir.openNextFile();
-        while (file) {
-            const char* name = file.name();
-            // Match pattern "*segment_XXXXX.csv"
-            const char* segPtr = strstr(name, "segment_");
-            if (segPtr) {
-                unsigned long num = 0;
-                if (sscanf(segPtr, "segment_%05lu", &num) == 1 || sscanf(segPtr, "segment_%lu", &num) == 1) {
-                    if (num > highest) highest = num;
+    if (!dir || !dir.isDirectory()) return 1;
+
+    File file = dir.openNextFile();
+    while (file) {
+        if (!file.isDirectory()) {
+            const char* marker = strstr(file.name(), "segment_");
+            if (marker) {
+                unsigned long number = 0;
+                if (sscanf(marker, "segment_%lu", &number) == 1 && number > highest) {
+                    highest = number;
                 }
             }
-            file = dir.openNextFile();
         }
-        dir.close();
+        file.close();
+        file = dir.openNextFile();
     }
+    dir.close();
     return highest + 1;
 }
 
 /**
- * @brief Open a new trial CSV file, write self-describing metadata headers,
- * and initialize state variables.
+ * @brief Finalizes and saves a successfully completed 10-minute trial segment.
+ *
+ * Flushes all remaining buffers, closes the CSV file, engages actuator failsafe,
+ * and emits a high-pitched victory chime (2500 Hz for 500 ms) confirming that
+ * the full 10-minute trial is complete and preserved on the SD card.
  */
-bool openTrial() {
-    if (!sdReady) {
-        Serial.println("[SD] Cannot start segment: SD card is unavailable");
-        return false;
+void finalizeTrial() {
+    if (!trialActive) return;
+
+    if (trialFile) {
+        trialFile.flush();
+        trialFile.close();
     }
+    trialActive = false;
+    applyFailsafe();
 
-    // Ensure any previously open trial is cleanly closed first
-    closeTrial();
+    // High confirmation chime: 2500 Hz for 500 ms
+    tone(BUZZER_PIN, 2500, 500);
+    Serial.printf("[TRIAL] Completed and saved: %s\n", trialPath.c_str());
+}
 
+/**
+ * @brief Cancels and deletes an incomplete trial segment stopped before 10 minutes.
+ *
+ * If a session is halted before reaching the required 10-minute duration,
+ * the partial CSV file is closed and deleted from the SD card to prevent
+ * incomplete records from polluting the training dataset. Emits a low warning buzz
+ * (700 Hz for 300 ms).
+ */
+void cancelTrial() {
+    if (!trialActive) return;
+
+    if (trialFile) {
+        trialFile.flush();
+        trialFile.close();
+    }
+    const bool removed = SD_MMC.remove(trialPath.c_str());
+    trialActive = false;
+    applyFailsafe();
+
+    // Low warning buzzer tone: 700 Hz for 300 ms
+    tone(BUZZER_PIN, 700, 300);
+    Serial.printf("[TRIAL] Cancelled (< 10 min); deleted=%s path=%s\n",
+        removed ? "true" : "false", trialPath.c_str());
+}
+
+/**
+ * @brief Opens a new trial CSV file and writes self-describing metadata headers.
+ *
+ * Initializes the trial state variables, resets derivative tracking baselines,
+ * creates the CSV file with ground-truth metadata, and emits an audio confirmation tone.
+ *
+ * @param owner True for an 'owner' trial; false for a 'nonowner' trial.
+ * @return True if the file was created and initialized successfully; false otherwise.
+ */
+bool openTrial(bool owner) {
+    if (!sdReady || trialActive) return false;
+
+    ownerLabel = owner;
     trialNumber = nextSegmentNumber();
     const char* label = ownerLabel ? "owner" : "nonowner";
+
     char fileName[96];
     snprintf(fileName, sizeof(fileName), "%s/%s_segment_%05lu.csv",
-             SD_LOG_DIRECTORY, label, static_cast<unsigned long>(trialNumber));
+        SD_LOG_DIRECTORY, label, static_cast<unsigned long>(trialNumber));
     trialPath = String(fileName);
 
     trialFile = SD_MMC.open(trialPath, FILE_WRITE);
     if (!trialFile) {
-        Serial.printf("[SD] Failed to create trial file: %s\n", trialPath.c_str());
+        Serial.printf("[SD] ERROR: Failed to create %s\n", trialPath.c_str());
         return false;
     }
 
-    // Write self-describing metadata header block
-    trialFile.printf("schema_version=1\n");
-    trialFile.printf("firmware_version=%s\n", MINAS_FW_VERSION);
+    // Write self-describing metadata header lines
+    trialFile.printf("schema_version=3\n");
+    trialFile.printf("firmware_version=%s\n", FIRMWARE_VERSION);
     trialFile.printf("label=%s\n", ownerLabel ? "owner" : "nonowner");
     trialFile.printf("is_owner=%d\n", ownerLabel ? 1 : 0);
     trialFile.printf("sample_interval_ms=%lu\n", SAMPLE_INTERVAL_MS);
+    trialFile.printf("planned_duration_ms=%lu\n", TRIAL_DURATION_MS);
+    trialFile.println("features=controller_and_actuators_only");
     trialFile.println("---");
 
-    // CSV column names (exactly 22 columns)
+    // Write CSV data column headers (exactly 20 columns)
     trialFile.println(
         "segment_number,sample_sequence,timestamp_ms,elapsed_ms,label,is_owner,"
         "controller_connected,raw_lx,raw_ly,raw_rx,raw_ry,l2,r2,buttons_mask,"
         "steering_deg,throttle_percent,steering_command_deg,esc_command_us,"
-        "steering_delta,throttle_delta,sonar_distance_cm,sonar_valid"
-    );
+        "steering_delta,throttle_delta");
     trialFile.flush();
 
-    // Reset trial counters and delta tracking
+    // Reset trial counters and delta tracking baselines
     sampleSequence = 0;
     samplesSinceFlush = 0;
     trialStartMs = millis();
-    previousSteering = STEERING_CENTER_DEG; // Reset delta baselines to avoid leakage from prior driver
+    previousSteering = STEERING_CENTER_DEG;
     previousThrottle = 0.0f;
     trialActive = true;
 
-    Serial.printf("[TRIAL] Started %s (%s)\n", trialPath.c_str(), ownerLabel ? "owner" : "nonowner");
+    // Chime confirmation: 2200 Hz for owner, 1200 Hz for nonowner
+    tone(BUZZER_PIN, ownerLabel ? 2200 : 1200, 180);
+    Serial.printf("[TRIAL] Started %s (%s); target duration=10 minutes\n",
+        trialPath.c_str(), ownerLabel ? "owner" : "nonowner");
     return true;
 }
 
 /**
- * @brief Pack physical PS5 buttons into an unsigned 16-bit integer bitmask.
+ * @brief Encodes the physical PS5 buttons into an unsigned 16-bit bitmask.
+ *
+ * @return 16-bit integer where each bit corresponds to an individual button state.
  */
 uint16_t buttonsMask() {
     uint16_t mask = 0;
@@ -208,20 +241,18 @@ uint16_t buttonsMask() {
 }
 
 /**
- * @brief Write one sample row to the open trial CSV file on the MicroSD card.
- * All 22 format specifiers strictly match their respective argument types.
+ * @brief Writes a single telemetry sample row to the open trial CSV file.
+ *
+ * Formats all 20 columns matching their exact data types. Flushes periodically
+ * to balance write performance and data protection against power loss.
  */
 void writeSample(uint32_t now, bool connected, int rawLx, int rawLy, int rawRx, int rawRy,
-                 int l2, int r2, uint16_t buttons, float steering,
-                 float throttle, int steeringCommand, int escCommand,
-                 float steeringDelta, float throttleDelta) {
-    if (!trialFile) return;
+    int l2, int r2, uint16_t buttons, float steering, float throttle,
+    int steeringCommand, int escCommand, float steeringDelta, float throttleDelta) {
+    if (!trialActive || !trialFile) return;
 
-    const int sonarValid = (sonarDistanceCm >= 0) ? 1 : 0;
-
-    // Fixed CSV row formatting: 22 format specifiers matching exactly 22 parameters
     const size_t written = trialFile.printf(
-        "%lu,%lu,%lu,%lu,%s,%d,%d,%d,%d,%d,%d,%d,%d,%u,%.2f,%.2f,%d,%d,%.4f,%.4f,%d,%d\n",
+        "%lu,%lu,%lu,%lu,%s,%d,%d,%d,%d,%d,%d,%d,%d,%u,%.2f,%.2f,%d,%d,%.4f,%.4f\n",
         static_cast<unsigned long>(trialNumber),
         static_cast<unsigned long>(++sampleSequence),
         static_cast<unsigned long>(now),
@@ -237,19 +268,15 @@ void writeSample(uint32_t now, bool connected, int rawLx, int rawLy, int rawRx, 
         steeringCommand,
         escCommand,
         steeringDelta,
-        throttleDelta,
-        sonarDistanceCm,
-        sonarValid
-    );
+        throttleDelta);
 
     if (written == 0) {
-        Serial.println("[SD] Write failure; closing trial and engaging neutral failsafe");
-        closeTrial();
+        Serial.println("[SD] ERROR: Write failure; cancelling trial and resetting SD");
+        cancelTrial();
         sdReady = false;
         return;
     }
 
-    // Flush periodically to protect data integrity without excessive write latency
     if (++samplesSinceFlush >= SD_FLUSH_EVERY_N_SAMPLES) {
         trialFile.flush();
         samplesSinceFlush = 0;
@@ -260,99 +287,102 @@ void writeSample(uint32_t now, bool connected, int rawLx, int rawLy, int rawRx, 
 // PERIODIC CONTROLLER SAMPLING & CONTROL LOOP
 // ============================================================================
 /**
- * @brief Sample ultrasonic distance, process PS5 inputs, update actuators,
- * and log data to MicroSD.
+ * @brief Evaluates controller state, updates vehicle actuators, and logs data.
+ *
+ * Executed at a fixed 20 Hz rate (every 50 ms):
+ * 1. Checks controller connection and button press transitions.
+ * 2. Starts new trials when Circle (owner) or Square (nonowner) is pressed.
+ * 3. Finalizes or cancels trials when Cross is pressed.
+ * 4. Automatically completes and saves trials upon reaching 10 minutes.
+ * 5. Handles controller disconnections safely (failsafe actuators + failsafe log row).
+ * 6. Reads analog inputs, applies transfer functions, outputs actuator commands,
+ *    and logs the sample to MicroSD.
  */
 void sampleController() {
     const uint32_t now = millis();
-
-    // 1. Ultrasonic Sonar Sampling (every SONAR_SAMPLE_INTERVAL_MS, default 100 ms / 10 Hz)
-    if (now - lastSonarMs >= SONAR_SAMPLE_INTERVAL_MS) {
-        lastSonarMs = now;
-        sonarDistanceCm = readSonarCm();
-    }
-
     const bool connected = ps5.isConnected();
-    const bool circle = connected ? ps5.Circle() : false;
-    const bool cross  = connected ? ps5.Cross()  : false;
+    const bool circle = connected && ps5.Circle();
+    const bool square = connected && ps5.Square();
+    const bool cross  = connected && ps5.Cross();
 
-    // 2. Button Edge Detection: Circle starts or switches driver segment
-    if (circle && !previousCircle) {
-        if (trialActive) {
-            closeTrial();
-            ownerLabel = !ownerLabel; // Switch driver label
-        }
-        if (openTrial()) {
-            // Audio confirmation tone: 2200 Hz (high) for owner, 1200 Hz (low) for nonowner
-            tone(BUZZER_PIN, ownerLabel ? 2200 : 1200, ownerLabel ? 120 : 240);
-            Serial.printf("[SEGMENT] Active label: %s\n", ownerLabel ? "owner" : "nonowner");
-        }
+    // 1. Session start triggers (allowed only when no trial is currently running)
+    if (!trialActive) {
+        if (circle && !previousCircle) openTrial(true);         // Circle = Owner trial
+        else if (square && !previousSquare) openTrial(false);    // Square = Non-owner trial
     }
 
-    // 3. Button Edge Detection: Cross closes current segment
-    if (cross && !previousCross) {
-        closeTrial();
-        noTone(BUZZER_PIN);
+    // 2. Manual session halt (Cross button)
+    // If pressed after completing 10 minutes: finalize and save.
+    // If pressed before 10 minutes: cancel and delete incomplete trial.
+    if (trialActive && cross && !previousCross) {
+        if (now - trialStartMs >= TRIAL_DURATION_MS) {
+            finalizeTrial();
+        } else {
+            cancelTrial();
+        }
     }
 
     previousCircle = circle;
+    previousSquare = square;
     previousCross = cross;
 
-    // 4. Handle Disconnect or Inactive State
+    // If no trial is active, ensure vehicle remains stopped and return
     if (!trialActive) {
         applyFailsafe();
         return;
     }
 
-    // If trial is active but controller disconnected, log a failsafe row (controller_connected = 0)
-    // so data continuity is maintained and offline ML filters can identify dropouts.
+    // 3. Automatic 10-minute completion check
+    if (now - trialStartMs >= TRIAL_DURATION_MS) {
+        finalizeTrial();
+        return;
+    }
+
+    // 4. Controller disconnect failsafe during an active trial
+    // Applies neutral output and logs a sample with connected=0 to preserve time continuity.
     if (!connected) {
         applyFailsafe();
         const float steeringDelta = STEERING_CENTER_DEG - previousSteering;
         const float throttleDelta = 0.0f - previousThrottle;
         writeSample(now, false, 0, 0, 0, 0, 0, 0, 0,
-                    STEERING_CENTER_DEG, 0.0f, STEERING_CENTER_DEG,
-                    ESC_FAILSAFE_US, steeringDelta, throttleDelta);
+            STEERING_CENTER_DEG, 0.0f, STEERING_CENTER_DEG,
+            ESC_FAILSAFE_US, steeringDelta, throttleDelta);
         previousSteering = STEERING_CENTER_DEG;
         previousThrottle = 0.0f;
         return;
     }
 
     // 5. Read Analog Inputs from PS5 DualSense
-    const int rawLx = ps5.LStickX(); // Steering: Left Stick X (-128 to 127)
-    const int rawLy = ps5.LStickY();
-    const int rawRx = ps5.RStickX();
-    const int rawRy = ps5.RStickY();
-    const int l2 = ps5.L2Value();    // Brake/Reverse pressure (0 to 255)
-    const int r2 = ps5.R2Value();    // Throttle pressure (0 to 255)
+    const int rawLx = ps5.LStickX();  // Steering: Left Stick horizontal axis (-128 to 127)
+    const int rawLy = ps5.LStickY();  // Left Stick vertical axis (-128 to 127)
+    const int rawRx = ps5.RStickX();  // Right Stick horizontal axis (-128 to 127)
+    const int rawRy = ps5.RStickY();  // Right Stick vertical axis (-128 to 127)
+    const int l2 = ps5.L2Value();     // Left Analog Trigger: Brake / Reverse (0 to 255)
+    const int r2 = ps5.R2Value();     // Right Analog Trigger: Forward Throttle (0 to 255)
 
-    // Calculate floating-point steering angle (0° to 180°, centered at 90°)
-    const float steering = ((static_cast<float>(rawLx) + 128.0f) * (STEERING_MAX_DEG - STEERING_MIN_DEG) / 255.0f) + STEERING_MIN_DEG;
+    // Calculate floating-point steering angle (0.0° to 180.0°, centered at 90.0°)
+    const float steering = ((static_cast<float>(rawLx) + 128.0f) *
+        (STEERING_MAX_DEG - STEERING_MIN_DEG) / 255.0f) + STEERING_MIN_DEG;
 
-    // Calculate signed throttle percentage (-100% to +100%)
+    // Calculate signed net throttle percentage (-100.0% to +100.0%)
     const float throttle = (static_cast<float>(r2) - static_cast<float>(l2)) * 100.0f / 255.0f;
 
-    // Calculate temporal derivatives (rate of control change)
+    // Calculate dynamic control rate-of-change (first derivative)
     const float steeringDelta = steering - previousSteering;
     const float throttleDelta = throttle - previousThrottle;
 
-    // Compute actuator commands
+    // Compute integer actuator commands
     const int steeringCommand = constrain(static_cast<int>(roundf(steering)), STEERING_MIN_DEG, STEERING_MAX_DEG);
     const int escCommand = throttleToPulse(throttle);
 
     // 6. Actuator Output Commands
     steeringServo.write(steeringCommand);
-    if (ENABLE_MOTOR_OUTPUT) {
-        esc.writeMicroseconds(escCommand);
-    } else {
-        esc.writeMicroseconds(ESC_FAILSAFE_US); // Safety neutral during bench testing
-    }
+    esc.writeMicroseconds(ENABLE_MOTOR_OUTPUT ? escCommand : ESC_FAILSAFE_US);
 
-    // 7. MicroSD Data Logging
-    // Note: escCommand is logged to record driver intent even when ENABLE_MOTOR_OUTPUT is false
+    // 7. Data Logging
+    // Always records the intended escCommand even in bench mode (ENABLE_MOTOR_OUTPUT = false)
     writeSample(now, true, rawLx, rawLy, rawRx, rawRy, l2, r2, buttonsMask(),
-                steering, throttle, steeringCommand, escCommand,
-                steeringDelta, throttleDelta);
+        steering, throttle, steeringCommand, escCommand, steeringDelta, throttleDelta);
 
     previousSteering = steering;
     previousThrottle = throttle;
@@ -366,54 +396,44 @@ void sampleController() {
 void setup() {
     Serial.begin(115200);
     delay(500);
-    Serial.println("\n[INIT] Minas WROVER Driver Data Collector starting...");
+    Serial.println("\n[INIT] Minas 10-minute driver data collector (without sonar)");
 
-    // Configure GPIOs
-    pinMode(SONAR_TRIG_PIN, OUTPUT);
-    digitalWrite(SONAR_TRIG_PIN, LOW);
-    pinMode(SONAR_ECHO_PIN, INPUT);
+    // Configure buzzer output
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
 
-    // Attach Servos and enforce neutral failsafe immediately
+    // Attach Servo and ESC to PWM channels and enforce neutral failsafe immediately
     steeringServo.setPeriodHertz(50);
     steeringServo.attach(STEERING_SERVO_PIN, 500, 2500);
     esc.setPeriodHertz(50);
     esc.attach(ESC_PIN, ESC_MIN_US, ESC_MAX_US);
     applyFailsafe();
 
-    // Initialize MicroSD Card in 1-bit SDMMC Mode (fast and reliable on ESP32-WROVER)
+    // Initialize MicroSD card in 1-bit SDMMC mode
     if (!SD_MMC.begin(SD_MOUNT_POINT, true, false)) {
-        Serial.println("[SD] ERROR: SD card initialization failed. Check card insertion and format (FAT32).");
-        sdReady = false;
+        Serial.println("[SD] ERROR: Initialization failed. Check card insertion and FAT32 format.");
     } else {
         if (!SD_MMC.exists(SD_LOG_DIRECTORY)) {
-            if (SD_MMC.mkdir(SD_LOG_DIRECTORY)) {
-                Serial.printf("[SD] Created logging directory: %s\n", SD_LOG_DIRECTORY);
-                sdReady = true;
-            } else {
-                Serial.printf("[SD] ERROR: Failed to create logging directory: %s\n", SD_LOG_DIRECTORY);
-                sdReady = false;
-            }
-        } else {
-            sdReady = true;
-            Serial.printf("[SD] Ready. Log directory: %s\n", SD_LOG_DIRECTORY);
+            SD_MMC.mkdir(SD_LOG_DIRECTORY);
         }
+        sdReady = SD_MMC.exists(SD_LOG_DIRECTORY);
+        Serial.printf("[SD] Ready=%s; Log directory: %s\n",
+            sdReady ? "true" : "false", SD_LOG_DIRECTORY);
     }
 
-    // Initialize PS5 Bluetooth Classic Interface
+    // Initialize PS5 Bluetooth Classic stack
     if (!ps5.begin(PS5_CONTROLLER_MAC)) {
-        Serial.println("[PS5] ERROR: Bluetooth host init failed. Verify controller MAC in Config.h.");
+        Serial.println("[PS5] ERROR: Bluetooth host initialization failed. Check controller MAC in Config.h.");
     } else {
-        Serial.printf("[PS5] Bluetooth initialized for MAC: %s. Pair DualSense controller.\n", PS5_CONTROLLER_MAC);
+        Serial.println("[PS5] Bluetooth initialized. Pair your PS5 DualSense controller.");
     }
 
-    Serial.println("[READY] Firmware initialized:");
-    Serial.println("  - Circle Button: Start / Switch Driver Segment (Owner <-> Nonowner)");
-    Serial.println("  - Cross Button:  Close and save active segment");
-    if (!ENABLE_MOTOR_OUTPUT) {
-        Serial.println("  - [SAFETY] ENABLE_MOTOR_OUTPUT is FALSE. Motor will stay neutral (Bench Mode).");
-    }
+    Serial.println("[READY] Protocol:");
+    Serial.println("  - Circle Button: Start 10-minute OWNER segment");
+    Serial.println("  - Square Button: Start 10-minute NON-OWNER segment");
+    Serial.println("  - Cross Button:  Cancel (< 10 min) or Finish (>= 10 min)");
+    Serial.println("  - Auto-stop:     Automatically saves at exactly 10 minutes");
+    Serial.printf("[READY] Motor Output: %s\n", ENABLE_MOTOR_OUTPUT ? "ENABLED (Live)" : "BENCH (Neutral)");
 }
 
 // ============================================================================
@@ -422,20 +442,20 @@ void setup() {
 void loop() {
     const uint32_t now = millis();
 
-    // Enforce 20 Hz (50 ms) fixed sampling period without timer phase drift
+    // Execute controller sampling at a strict 20 Hz (50 ms) fixed rate without phase drift
     if (now - lastSampleMs >= SAMPLE_INTERVAL_MS) {
         lastSampleMs += SAMPLE_INTERVAL_MS;
         if (now - lastSampleMs > SAMPLE_INTERVAL_MS) {
-            // If execution fell significantly behind, resynchronize to current time
+            // Resynchronize if execution fell significantly behind
             lastSampleMs = now;
         }
         sampleController();
     }
 
-    // Ensure motor stops instantly if controller disconnects
+    // Safety guarantee: stop motors immediately if controller disconnects
     if (!ps5.isConnected()) {
         applyFailsafe();
     }
 
-    delay(1); // Yield to background FreeRTOS tasks (Bluetooth stack & WiFi)
+    delay(1); // Yield execution to background FreeRTOS tasks (Bluetooth stack)
 }

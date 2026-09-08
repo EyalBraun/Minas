@@ -3,70 +3,78 @@
 #include <stdint.h>
 
 // ============================================================================
-// MINAS WROVER DRIVER-RECOGNITION DATA COLLECTOR - HARDWARE & FIRMWARE CONFIG
+// MINAS WROVER DRIVER-RECOGNITION DATA COLLECTOR - HARDWARE & SYSTEM CONFIG
 // ============================================================================
+// SAFETY PRECAUTION BEFORE LIVE VEHICLE OPERATION:
+// Lift the vehicle chassis off the ground with wheels elevated.
+// Verify steering servo centering and ESC direction/calibration before enabling
+// live motor drive. Perform initial tests at low speed in an enclosed, safe area.
 
 // ----------------------------------------------------------------------------
-// 1. BLUETOOTH & CONTROLLER SETTINGS
+// 1. BLUETOOTH & CONTROLLER CONFIGURATION
 // ----------------------------------------------------------------------------
-// PS5 DualSense Bluetooth MAC address. Replace with your controller's MAC.
+// Bluetooth MAC address of the paired Sony PS5 DualSense controller.
+// Replace with the unique MAC address of your specific controller.
 #define PS5_CONTROLLER_MAC "00:00:00:00:00:00"
 
-// Binary experiment initial ground-truth label:
-// 1 = owner, 0 = nonowner.
-#define INITIAL_OWNER_LABEL 1
-
 // ----------------------------------------------------------------------------
-// 2. ESP32-WROVER GPIO ASSIGNMENTS & PIN CONSTRAINTS
+// 2. ESP32-WROVER GPIO PIN ASSIGNMENTS
 // ----------------------------------------------------------------------------
-// IMPORTANT PIN CONSTRAINTS FOR ESP32-WROVER:
-// - GPIO 16 & 17: Reserved for internal PSRAM (SPI RAM). Never reassign!
-// - GPIO 6-11:    Connected to internal SPI Flash. Never reassign!
-// - GPIO 2, 14, 15: Used by onboard MicroSD slot in 1-bit SDMMC Mode.
-// - GPIO 34-39:   Input-only pins (no internal pull-up/pull-down resistors).
+// HARDWARE PIN CONSTRAINTS FOR ESP32-WROVER:
+// - GPIO 16 & 17: Dedicated to internal SPI PSRAM (Pseudo-Static RAM). NEVER use!
+// - GPIO 6 to 11: Dedicated to internal SPI Flash memory bus. NEVER use!
+// - GPIO 2, 14, 15: Used by the onboard MicroSD card slot in 1-bit SDMMC mode.
+// - GPIO 34 to 39: Input-only pins without internal pull-up/pull-down resistors.
 //
-// Selected Pinout:
+// Selected Actuator and Feedback Pins:
 #define STEERING_SERVO_PIN 25  // Output: 50 Hz PWM control signal for steering servo
-#define ESC_PIN            26  // Output: 50 Hz PWM control signal for electronic speed controller
-#define SONAR_TRIG_PIN     27  // Output: 10 µs trigger pulse for HC-SR04 ultrasonic sensor
-#define SONAR_ECHO_PIN     33  // Input:  Echo return pulse (MUST use voltage divider for 3.3V!)
-#define BUZZER_PIN         32  // Output: Piezo buzzer tone signal
+#define ESC_PIN            26  // Output: 50 Hz PWM control signal for traction ESC
+#define BUZZER_PIN         32  // Output: Piezo buzzer tone signal for acoustic feedback
 
 // ----------------------------------------------------------------------------
-// 3. HC-SR04 ULTRASONIC SENSOR TIMING & CONSTRAINTS
+// 3. CONTROL LOOP & EXPERIMENT TIMING
 // ----------------------------------------------------------------------------
-#define SONAR_TIMEOUT_US         25000UL  // 25 ms timeout (~430 cm maximum obstacle distance)
-#define SONAR_SAMPLE_INTERVAL_MS 100UL    // Sample sonar every 100 ms (10 Hz) to avoid echo reverberation
+#define SAMPLE_INTERVAL_MS 50UL       // Sampling period: 50 ms = 20 Hz fixed target rate
+#define TRIAL_DURATION_MS  600000UL   // Segment duration: 10 minutes (600,000 milliseconds)
 
 // ----------------------------------------------------------------------------
-// 4. MICROSD LOGGING CONFIGURATION (SDMMC 1-BIT MODE)
+// 4. MICROSD DATA STORAGE (1-BIT SDMMC MODE)
 // ----------------------------------------------------------------------------
-#define SD_MOUNT_POINT           "/sdcard"
-#define SD_LOG_DIRECTORY         "/trials"
-#define SD_FLUSH_EVERY_N_SAMPLES 10U      // Flush to SD card every 10 samples (500 ms)
+#define SD_MOUNT_POINT           "/sdcard"  // Virtual File System mount point
+#define SD_LOG_DIRECTORY         "/trials"  // Root directory on SD card for CSV logs
+#define SD_FLUSH_EVERY_N_SAMPLES 10U        // Flush file buffer to card every 10 samples (500 ms)
 
 // ----------------------------------------------------------------------------
-// 5. CONTROL LOOP TIMING
+// 5. ACTUATOR & PWM SAFETY LIMITS
 // ----------------------------------------------------------------------------
-// Target sampling rate for control and data logging: 50 ms = 20 Hz.
-#define SAMPLE_INTERVAL_MS       50UL
+// Steering Servo Range (in degrees):
+#define STEERING_MIN_DEG    0     // Maximum left turn angle
+#define STEERING_MAX_DEG    180   // Maximum right turn angle
+#define STEERING_CENTER_DEG 90    // Straight-ahead neutral position
+
+// Electronic Speed Controller (ESC) Pulse Width Range (in microseconds):
+// Standard RC ESC mapping: 1000 µs = Full Reverse / Brake, 1500 µs = Neutral, 2000 µs = Full Forward
+#define ESC_MIN_US          1000  // Full reverse / braking pulse width
+#define ESC_NEUTRAL_US      1500  // Safe neutral (motor stopped) pulse width
+#define ESC_MAX_US          2000  // Full forward throttle pulse width
+#define ESC_FAILSAFE_US     ESC_NEUTRAL_US
 
 // ----------------------------------------------------------------------------
-// 6. ACTUATOR & PWM SAFETY LIMITS
+// 6. MOTOR SAFETY LOCK & VERSIONING
 // ----------------------------------------------------------------------------
-#define STEERING_MIN_DEG         0
-#define STEERING_MAX_DEG         180
-#define STEERING_CENTER_DEG      90
+// true  = Live driving mode: Motor receives live throttle commands from controller.
+// false = Bench test mode: Motor is locked at neutral (1500 µs), but driver inputs
+//         are still computed and recorded to the CSV file for safe offline verification.
+#define ENABLE_MOTOR_OUTPUT true
 
-#define ESC_MIN_US               1000
-#define ESC_NEUTRAL_US           1500
-#define ESC_MAX_US               2000
-#define ESC_FAILSAFE_US          ESC_NEUTRAL_US
+#define FIRMWARE_VERSION "minas-10min-no-sonar-v3"
 
 // ----------------------------------------------------------------------------
-// 7. HARDWARE SAFETY LOCK
+// 7. EXPERIMENTAL RECORDING PROTOCOL
 // ----------------------------------------------------------------------------
-// false = Bench test mode: Logs intended driver commands to CSV, but keeps
-//         physical ESC signal locked at 1500 µs (neutral) for safety.
-// true  = Active drive mode: Sends live throttle PWM to the ESC motor.
-#define ENABLE_MOTOR_OUTPUT      false
+// - Circle Button: Start a new 10-minute 'owner' segment.
+// - Square Button: Start a new 10-minute 'nonowner' segment.
+// - Cross Button:  If pressed before 10 minutes, cancels and deletes the incomplete trial.
+//                  If pressed after 10 minutes, finalizes and saves the complete trial.
+// - Automatic Stop: Segments automatically finalize and save upon reaching 10 minutes.
+// - Telemetry data collection only occurs during an active, started segment.
