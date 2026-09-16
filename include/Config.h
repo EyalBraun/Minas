@@ -15,7 +15,7 @@
 // ----------------------------------------------------------------------------
 // Bluetooth MAC address of the paired Sony PS5 DualSense controller.
 
-#define PS5_CONTROLLER_MAC "0c:27:56:21:71:6"
+#define PS5_CONTROLLER_MAC "14:3a:9a:d1:f4:0a"
 
 // ----------------------------------------------------------------------------
 // 2. ESP32-WROVER GPIO PIN ASSIGNMENTS

@@ -42,9 +42,23 @@ bool previousCircle = false;      // Previous state of PS5 Circle button (for ed
 bool previousSquare = false;      // Previous state of PS5 Square button (for edge detection)
 bool previousCross = false;       // Previous state of PS5 Cross button (for edge detection)
 
-// ============================================================================
-// ACTUATOR & FAILSAFE SUBSYSTEM
-// ============================================================================
+/**
+ * @brief Emits a clean tone without using or corrupting any hardware LEDC PWM timers.
+ * Prevents timer hijacking that corrupts Servo and ESC frequencies.
+ */
+void safeBeep(uint32_t freqHz, uint32_t durationMs) {
+    if (freqHz == 0 || durationMs == 0) return;
+    uint32_t periodUs = 1000000UL / freqHz;
+    uint32_t halfPeriodUs = periodUs / 2;
+    uint32_t cycles = (durationMs * 1000UL) / periodUs;
+    for (uint32_t i = 0; i < cycles; i++) {
+        digitalWrite(BUZZER_PIN, HIGH);
+        delayMicroseconds(halfPeriodUs);
+        digitalWrite(BUZZER_PIN, LOW);
+        delayMicroseconds(halfPeriodUs);
+    }
+}
+
 /**
  * @brief Enforces safe neutral positions on both actuators.
  *
@@ -69,6 +83,9 @@ void applyFailsafe() {
  * @return Pulse width in microseconds constrained between ESC_MIN_US and ESC_MAX_US.
  */
 int throttleToPulse(float throttlePercent) {
+    if (fabsf(throttlePercent) < 1.0f) {
+        return ESC_NEUTRAL_US;
+    }
     throttlePercent = constrain(throttlePercent, -100.0f, 100.0f);
     if (throttlePercent >= 0.0f) {
         return ESC_NEUTRAL_US + static_cast<int>((ESC_MAX_US - ESC_NEUTRAL_US) * throttlePercent / 100.0f);
@@ -128,8 +145,8 @@ void finalizeTrial() {
     trialActive = false;
     applyFailsafe();
 
-    // High confirmation chime: 2500 Hz for 500 ms
-    tone(BUZZER_PIN, 2500, 500);
+    // High confirmation chime: 2500 Hz for 300 ms
+    safeBeep(2500, 300);
     Serial.printf("[TRIAL] Completed and saved: %s\n", trialPath.c_str());
 }
 
@@ -152,8 +169,8 @@ void cancelTrial() {
     trialActive = false;
     applyFailsafe();
 
-    // Low warning buzzer tone: 700 Hz for 300 ms
-    tone(BUZZER_PIN, 700, 300);
+    // Low warning buzzer tone: 700 Hz for 200 ms
+    safeBeep(700, 200);
     Serial.printf("[TRIAL] Cancelled (< 10 min); deleted=%s path=%s\n",
         removed ? "true" : "false", trialPath.c_str());
 }
@@ -171,7 +188,7 @@ bool openTrial(bool owner) {
     if (trialActive) return false;
     if (!sdReady) {
         Serial.println("[SD] ERROR: Cannot start trial - MicroSD card is not ready or failed to mount!");
-        tone(BUZZER_PIN, 500, 400); // Low warning buzz
+        safeBeep(500, 400); // Low warning buzz
         return false;
     }
 
@@ -217,14 +234,14 @@ bool openTrial(bool owner) {
     trialActive = true;
 
     // Chime confirmation: 2200 Hz for owner, 1200 Hz for nonowner
-    tone(BUZZER_PIN, ownerLabel ? 2200 : 1200, 180);
+    safeBeep(ownerLabel ? 2200 : 1200, 150);
     Serial.printf("[TRIAL] Started %s (%s); target duration=10 minutes\n",
         trialPath.c_str(), ownerLabel ? "owner" : "nonowner");
     return true;
 }
 
 /**
- * @brief Encodes the physical PS5 buttons into an unsigned 16-bit bitmask.
+ * @brief Encodes physical PS5 buttons into an unsigned 16-bit bitmask.
  *
  * @return 16-bit integer where each bit corresponds to an individual button state.
  */
@@ -314,16 +331,18 @@ void sampleController() {
     if (!trialActive) {
         if (circle && !previousCircle) openTrial(true);         // Circle = Owner trial
         else if (square && !previousSquare) openTrial(false);    // Square = Non-owner trial
-    }
-
-    // 2. Manual session halt (Cross button)
-    // If pressed after completing 10 minutes: finalize and save.
-    // If pressed before 10 minutes: cancel and delete incomplete trial.
-    if (trialActive && cross && !previousCross) {
-        if (now - trialStartMs >= TRIAL_DURATION_MS) {
+    } else {
+        // 2. Manual session halt (Cross button)
+        if (cross && !previousCross) {
+            if (millis() - trialStartMs >= TRIAL_DURATION_MS) {
+                finalizeTrial();
+            } else {
+                cancelTrial();
+            }
+        }
+        // 3. Automatic 10-minute completion check
+        else if (millis() - trialStartMs >= TRIAL_DURATION_MS) {
             finalizeTrial();
-        } else {
-            cancelTrial();
         }
     }
 
@@ -331,29 +350,18 @@ void sampleController() {
     previousSquare = square;
     previousCross = cross;
 
-    // If no trial is active, ensure vehicle remains stopped and return
-    if (!trialActive) {
-        applyFailsafe();
-        return;
-    }
-
-    // 3. Automatic 10-minute completion check
-    if (now - trialStartMs >= TRIAL_DURATION_MS) {
-        finalizeTrial();
-        return;
-    }
-
-    // 4. Controller disconnect failsafe during an active trial
-    // Applies neutral output and logs a sample with connected=0 to preserve time continuity.
+    // 4. Controller disconnect failsafe
     if (!connected) {
         applyFailsafe();
-        const float steeringDelta = STEERING_CENTER_DEG - previousSteering;
-        const float throttleDelta = 0.0f - previousThrottle;
-        writeSample(now, false, 0, 0, 0, 0, 0, 0, 0,
-            STEERING_CENTER_DEG, 0.0f, STEERING_CENTER_DEG,
-            ESC_FAILSAFE_US, steeringDelta, throttleDelta);
-        previousSteering = STEERING_CENTER_DEG;
-        previousThrottle = 0.0f;
+        if (trialActive) {
+            const float steeringDelta = STEERING_CENTER_DEG - previousSteering;
+            const float throttleDelta = 0.0f - previousThrottle;
+            writeSample(now, false, 0, 0, 0, 0, 0, 0, 0,
+                STEERING_CENTER_DEG, 0.0f, STEERING_CENTER_DEG,
+                ESC_FAILSAFE_US, steeringDelta, throttleDelta);
+            previousSteering = STEERING_CENTER_DEG;
+            previousThrottle = 0.0f;
+        }
         return;
     }
 
@@ -362,15 +370,27 @@ void sampleController() {
     const int rawLy = ps5.LStickY();  // Left Stick vertical axis (-128 to 127)
     const int rawRx = ps5.RStickX();  // Right Stick horizontal axis (-128 to 127)
     const int rawRy = ps5.RStickY();  // Right Stick vertical axis (-128 to 127)
-    const int l2 = ps5.L2Value();     // Left Analog Trigger: Brake / Reverse (0 to 255)
-    const int r2 = ps5.R2Value();     // Right Analog Trigger: Forward Throttle (0 to 255)
+    const int rawL2 = ps5.L2Value();  // Left Analog Trigger: Brake / Reverse (0 to 255)
+    const int rawR2 = ps5.R2Value();  // Right Analog Trigger: Forward Throttle (0 to 255)
+
+    // Deadband thresholds to eliminate stick drift, trigger resting noise,
+    // and accidental trigger activation when controller rests on a desk
+    constexpr int TRIGGER_DEADBAND = 20;   // 0..255 (~8% threshold)
+    constexpr int STEERING_DEADBAND = 10;  // -128..127 (~8% threshold)
+
+    const int filteredLx = (abs(rawLx) > STEERING_DEADBAND) ? rawLx : 0;
+    const int filteredR2 = (rawR2 > TRIGGER_DEADBAND) ? (rawR2 - TRIGGER_DEADBAND) : 0;
+    const int filteredL2 = (rawL2 > TRIGGER_DEADBAND) ? (rawL2 - TRIGGER_DEADBAND) : 0;
 
     // Calculate floating-point steering angle (0.0° to 180.0°, centered at 90.0°)
-    const float steering = ((static_cast<float>(rawLx) + 128.0f) *
+    const float steering = ((static_cast<float>(filteredLx) + 128.0f) *
         (STEERING_MAX_DEG - STEERING_MIN_DEG) / 255.0f) + STEERING_MIN_DEG;
 
     // Calculate signed net throttle percentage (-100.0% to +100.0%)
-    const float throttle = (static_cast<float>(r2) - static_cast<float>(l2)) * 100.0f / 255.0f;
+    float throttle = 0.0f;
+    if (filteredR2 > 0 || filteredL2 > 0) {
+        throttle = (static_cast<float>(filteredR2) - static_cast<float>(filteredL2)) * 100.0f / (255.0f - TRIGGER_DEADBAND);
+    }
 
     // Calculate dynamic control rate-of-change (first derivative)
     const float steeringDelta = steering - previousSteering;
@@ -380,14 +400,15 @@ void sampleController() {
     const int steeringCommand = constrain(static_cast<int>(roundf(steering)), STEERING_MIN_DEG, STEERING_MAX_DEG);
     const int escCommand = throttleToPulse(throttle);
 
-    // 6. Actuator Output Commands
+    // 6. Actuator Output Commands - ALWAYS active when controller is connected
     steeringServo.write(steeringCommand);
     esc.writeMicroseconds(ENABLE_MOTOR_OUTPUT ? escCommand : ESC_FAILSAFE_US);
 
-    // 7. Data Logging
-    // Always records the intended escCommand even in bench mode (ENABLE_MOTOR_OUTPUT = false)
-    writeSample(now, true, rawLx, rawLy, rawRx, rawRy, l2, r2, buttonsMask(),
-        steering, throttle, steeringCommand, escCommand, steeringDelta, throttleDelta);
+    // 7. MicroSD Data Logging - active during 10-minute recorded trials
+    if (trialActive) {
+        writeSample(now, true, rawLx, rawLy, rawRx, rawRy, rawL2, rawR2, buttonsMask(),
+            steering, throttle, steeringCommand, escCommand, steeringDelta, throttleDelta);
+    }
 
     previousSteering = steering;
     previousThrottle = throttle;
@@ -419,9 +440,11 @@ void setup() {
     esc.setPeriodHertz(50);
     esc.attach(ESC_PIN, ESC_MIN_US, ESC_MAX_US);
     applyFailsafe();
+    Serial.println("[ESC] Arming ESC with neutral pulse (2-second hold)...");
+    delay(2000);
 
-    // Initialize MicroSD card in 1-bit SDMMC mode
-    if (!SD_MMC.begin(SD_MOUNT_POINT, true, false)) {
+    // Initialize MicroSD card in 1-bit SDMMC mode (format_if_mount_failed = true)
+    if (!SD_MMC.begin(SD_MOUNT_POINT, true, true)) {
         Serial.println("[SD] ERROR: Initialization failed. Check card insertion and FAT32 format.");
     } else {
         if (!SD_MMC.exists(SD_LOG_DIRECTORY)) {
@@ -439,11 +462,9 @@ void setup() {
     }
 
     // Initialize PS5 Bluetooth Classic stack
-    if (!ps5.begin(PS5_CONTROLLER_MAC)) {
-        Serial.println("[PS5] ERROR: Bluetooth host initialization failed. Check controller MAC in Config.h.");
-    } else {
-        Serial.println("[PS5] Bluetooth initialized. Pair your PS5 DualSense controller.");
-    }
+    Serial.printf("[PS5] Initializing Bluetooth with target MAC: %s\n", PS5_CONTROLLER_MAC);
+    ps5.begin(PS5_CONTROLLER_MAC);
+    Serial.println("[PS5] Bluetooth host ready. Turn on your PS5 DualSense controller.");
 
     Serial.println("[READY] Protocol:");
     Serial.println("  - Circle Button: Start 10-minute OWNER segment");
@@ -459,6 +480,44 @@ void setup() {
 void loop() {
     const uint32_t now = millis();
 
+    // Track connection transitions for immediate user feedback
+    static bool wasConnected = false;
+    const bool currentConnected = ps5.isConnected();
+    if (currentConnected && !wasConnected) {
+        wasConnected = true;
+        Serial.println("\n[PS5] >>> CONTROLLER CONNECTED & READY! <<<");
+        safeBeep(1800, 100);
+    } else if (!currentConnected && wasConnected) {
+        wasConnected = false;
+        Serial.println("\n[PS5] >>> CONTROLLER DISCONNECTED! (Failsafe Active) <<<");
+        safeBeep(600, 150);
+        applyFailsafe();
+    }
+
+    // Periodic status print every 2 seconds when controller is connected and trial is active
+    static uint32_t lastStatusPrintMs = 0;
+    if (trialActive && (now - lastStatusPrintMs >= 2000UL)) {
+        lastStatusPrintMs = now;
+        uint32_t elapsedSec = (now - trialStartMs) / 1000UL;
+        uint32_t remainingSec = (TRIAL_DURATION_MS - (now - trialStartMs)) / 1000UL;
+        Serial.printf("[TRIAL PROGRESS] %s | Elapsed: %lu s (%lu min) | Remaining: %lu s | Samples: %lu\n",
+                      ownerLabel ? "OWNER" : "NON-OWNER",
+                      (unsigned long)elapsedSec, (unsigned long)(elapsedSec / 60),
+                      (unsigned long)remainingSec, (unsigned long)sampleSequence);
+    }
+
+    // High-visibility live control telemetry printed every 500 ms when controller is connected
+    static uint32_t lastTelemetryPrintMs = 0;
+    if (currentConnected && (now - lastTelemetryPrintMs >= 500UL)) {
+        lastTelemetryPrintMs = now;
+        Serial.printf("[LIVE CTRL] L2:%3u R2:%3u | Throt:%+5.1f%% | ESC:%4d us | Steer:%3d deg | State:%s\n",
+                      ps5.L2Value(), ps5.R2Value(),
+                      previousThrottle,
+                      throttleToPulse(previousThrottle),
+                      static_cast<int>(roundf(previousSteering)),
+                      trialActive ? (ownerLabel ? "RECORDING_OWNER" : "RECORDING_NONOWNER") : "STANDBY_NEUTRAL");
+    }
+
     // Execute controller sampling at a strict 20 Hz (50 ms) fixed rate without phase drift
     if (now - lastSampleMs >= SAMPLE_INTERVAL_MS) {
         lastSampleMs += SAMPLE_INTERVAL_MS;
@@ -470,7 +529,7 @@ void loop() {
     }
 
     // Safety guarantee: stop motors immediately if controller disconnects
-    if (!ps5.isConnected()) {
+    if (!currentConnected) {
         applyFailsafe();
     }
 
