@@ -34,9 +34,9 @@ Traditional automotive anti-theft security relies on **one-time static authentic
 
 ### The Minas Solution: Zero-Trust Continuous Behavioral Biometrics
 **Minas** introduces an active, embedded security gatekeeper:
-1. **Neuromotor Behavioral Biometrics:** Every human driver possesses a unique, subconscious "motor signature"—fine-grained steering micro-adjustments, trigger pressure gradients, throttle onset rates, and control derivative profiles ($\Delta\text{Steering}, \Delta\text{Throttle}$).
+1. **Neuromotor Behavioral Biometrics:** Every human driver possesses a unique, subconscious "motor signature"—fine-grained steering micro-adjustments, trigger pressure gradients, throttle onset rates, and control derivative profiles: $\Delta\text{Steering}$ and $\Delta\text{Throttle}$.
 2. **Edge AI / TinyML:** Instead of streaming high-frequency telemetry to a vulnerable remote cloud server (introducing network latency, connectivity dependency, and privacy risks), classification is performed **100% locally on the ESP32-WROVER**.
-3. **Active Cyber-Physical Mitigation:** When an unauthorized driver operates the vehicle, the microcontroller triggers an instant hardware failsafe: neutralizes the Electronic Speed Controller (ESC 1500 µs), centers the steering, and activates an acoustic alarm buzzer.
+3. **Active Cyber-Physical Mitigation:** When an unauthorized driver operates the vehicle, the microcontroller triggers an instant hardware failsafe: neutralizes the Electronic Speed Controller (ESC at 1500 µs), centers the steering, and activates an acoustic alarm buzzer.
 
 ---
 
@@ -46,16 +46,15 @@ The project operates across a two-phase lifecycle: **Phase 1 (Data Collection & 
 
 ![System Architecture & Data Flow](docs/images/system_flow.png)
 
-
 ### Operational Phases:
 1. **Phase 1 — Ground Truth Data Collection:**
-   - The ESP32 samples user inputs and vehicle commands at a strict **20 Hz rate (every 50 ms)**.
+   - The ESP32 samples user inputs and vehicle commands at a strict **20 Hz rate** (every 50 ms).
    - Telemetry is buffered in RAM and streamed directly to an onboard MicroSD card via 1-bit SDMMC.
-   - Structured 10-minute trials are recorded for the legitimate **Owner** (Circle button) and **Non-Owner Impostors** (Square button).
+   - Structured **10\-minute trials** are recorded for the legitimate **Owner** (Circle button) and **Non\-Owner Impostors** (Square button).
    - Completed CSV logs are transferred to a PC for automated sliding-window feature extraction and model training.
 2. **Phase 2 — Real-Time Edge Inference:**
    - The trained classifier is compiled into the ESP32 firmware.
-   - Live driving dynamics are evaluated across a **2.0-second sliding window** (40 samples, stepped every 0.5 seconds).
+   - Live driving dynamics are evaluated across a **2.0\-second sliding window** (40 samples, stepped every 0.5 seconds).
    - If an unauthorized driver is detected, the ESP32 overrides control, shuts down the motor, and sounds the alarm.
 
 ---
@@ -70,7 +69,7 @@ Reliable operation of high-current actuators alongside an RF-sensitive microcont
 
 | Peripheral | Board Pin | Electrical Spec | Subsystem Function |
 |---|---|---|---|
-| **Steering Servo Signal** | `GPIO 25` | 3.3V Logic PWM (50 Hz) | Controls steering angle ($0^\circ$ to $180^\circ$, neutral $90^\circ$). |
+| **Steering Servo Signal** | `GPIO 25` | 3.3V Logic PWM (50 Hz) | Controls steering angle ($0^{\circ}$ to $180^{\circ}$, neutral $90^{\circ}$). |
 | **ESC Throttle Signal** | `GPIO 26` | 3.3V Logic PWM (50 Hz) | Electronic Speed Controller throttle ($1000\,\mu\text{s}$ to $2000\,\mu\text{s}$, neutral $1500\,\mu\text{s}$). |
 | **Piezo Buzzer (+)** | `GPIO 32` | 3.3V Square Wave (`safeBeep`) | Acoustic feedback without LEDC timer hijacking. |
 | **MicroSD Card Bus** | `GPIO 2, 14, 15` | 1-bit Hardware SDMMC | High-speed logging (D0: GPIO 2, CLK: GPIO 14, CMD: GPIO 15). |
@@ -90,9 +89,9 @@ Minas uses standard automotive dual-trigger control (**Option A**), configured s
 
 | Control Input | Controller Action | Vehicle Response | Data Mapping Range |
 |---|---|---|---|
-| **Steering** | **Left Stick (X-Axis)** | Steers front wheels Left / Right | $-128 \dots +127 \longrightarrow 0^\circ \dots 180^\circ$ (Center: $90^\circ$) |
-| **Throttle** | **R2 Analog Trigger** | Progressive Forward Acceleration | $0 \dots 255 \longrightarrow 0.0\% \dots +100.0\%$ ($1500 \dots 2000\,\mu\text{s}$) |
-| **Brake / Reverse** | **L2 Analog Trigger** | Progressive Braking / Reverse Drive | $0 \dots 255 \longrightarrow 0.0\% \dots -100.0\%$ ($1500 \dots 1000\,\mu\text{s}$) |
+| **Steering** | **Left Stick (X-Axis)** | Steers front wheels Left / Right | `-128` to `+127` $\rightarrow$ $0^{\circ} \dots 180^{\circ}$ (Center: $90^{\circ}$) |
+| **Throttle** | **R2 Analog Trigger** | Progressive Forward Acceleration | `0` to `255` $\rightarrow$ 0.0% to +100.0% ($1500 \dots 2000\,\mu\text{s}$) |
+| **Brake / Reverse** | **L2 Analog Trigger** | Progressive Braking / Reverse Drive | `0` to `255` $\rightarrow$ 0.0% to -100.0% ($1500 \dots 1000\,\mu\text{s}$) |
 | **Owner Trial** | **Circle (○) Button** | Starts 10-Minute Recorded Owner Trial | Emits $2200\text{ Hz}$ confirmation chime |
 | **Non-Owner Trial** | **Square (□) Button** | Starts 10-Minute Recorded Non-Owner Trial | Emits $1200\text{ Hz}$ confirmation chime |
 | **Cancel / Finish** | **Cross (✕) Button** | Cancel ($<10\text{ min}$) or Finish ($\ge 10\text{ min}$) | Warning buzz or high victory chime |
@@ -100,88 +99,4 @@ Minas uses standard automotive dual-trigger control (**Option A**), configured s
 ### Built-in Deadband & Safety Features:
 * **Trigger Deadband (20 units):** Prevents creeping caused by the physical resting weight of the DualSense controller on a flat surface.
 * **Steering Deadband (10 units):** Eliminates center stick drift.
-* **ESC Neutral Arming:** The firmware holds neutral ($1500\,\mu\text{s}$) for 2.0 seconds at boot to properly calibrate and arm the ESC.
-* **Controller Disconnect Failsafe:** If Bluetooth connection is lost, failsafe activates within $50\text{ ms}$ (motor stops, steering centers).
-
----
-
-## ⏱️ Experimental Protocol & 10-Minute Trial Collection
-
-To prevent machine learning models from merely memorizing a specific track layout rather than learning true behavioral biometrics, data collection follows a structured **multi-driver, multi-track protocol**:
-
-```
-+-----------------------------------------------------------------------------+
-|                          EXPERIMENTAL TRACK SUITE                           |
-+-----------------------------------------------------------------------------+
-|  Track A (Straight Line)  | Long straightaway: high-speed acceleration,     |
-|                           | threshold braking, and launch dynamics.         |
-+---------------------------+-------------------------------------------------+
-|  Track B (Curved Course)  | 90° hairpin turns, sweeping wide bends,         |
-|                           | and rapid directional transitions.              |
-+---------------------------+-------------------------------------------------+
-|  Track C (Slalom Course)  | Variable-spaced cone obstacles requiring rapid, |
-|                           | continuous steering adjustments.                |
-+---------------------------+-------------------------------------------------+
-|  Track D (Held-Out Test)  | COMPLETELY UNSEEN course configuration used     |
-|                           | EXCLUSIVELY to test model generalization!       |
-+-----------------------------------------------------------------------------+
-```
-
-### Dataset Structure (16 Complete Trials = 160 Minutes of Driving):
-* **1 Authorized Owner:** 4 trials $\times$ 10 min = 40 minutes total.
-* **3 Impostor Non-Owners:** 4 trials $\times$ 10 min each = 120 minutes total.
-* **Strict Whole-Session Split:** The held-out evaluation dataset uses completely independent session files to prevent **data leakage** across overlapping time windows.
-
----
-
-## 📊 Telemetry & Sliding-Window Feature Schema
-
-### Raw CSV Format (Recorded at 20 Hz / Every 50 ms)
-Files are stored under `/trials/owner_segment_XXXXX.csv` or `/trials/nonowner_segment_XXXXX.csv`. Each file begins with metadata headers followed by 20 data columns:
-
-```csv
-schema_version=3
-firmware_version=minas-10min-no-sonar-v3
-label=owner
-is_owner=1
-sample_interval_ms=50
-planned_duration_ms=600000
-features=controller_and_actuators_only
----
-segment_number,sample_sequence,timestamp_ms,elapsed_ms,label,is_owner,controller_connected,raw_lx,raw_ly,raw_rx,raw_ry,l2,r2,buttons_mask,steering_deg,throttle_percent,steering_command_deg,esc_command_us,steering_delta,throttle_delta
-```
-
-## 🧠 Machine Learning Pipeline & Model Training
-
-### 1. Extract Features & Split Dataset
-Run [`tools_train_driver.py`](tools_train_driver.py) to validate trial logs, perform a balanced class-stratified split (12 training files, 4 held-out evaluation files), and generate tabular sliding windows:
-
-```bash
-python tools_train_driver.py \
-  --data-dir data/raw \
-  --out-dir data/processed \
-  --window 40 \
-  --stride 10 \
-  --seed 20260908
-```
-
-**Output Artifacts:**
-* `data/processed/train_raw/`: 12 training trial CSVs (6 owner, 6 non-owner).
-* `data/processed/test_raw/`: 4 held-out evaluation CSVs (2 owner, 2 non-owner).
-* `data/processed/train_window/windows.csv`: Extracted training feature matrix.
-* `data/processed/test_window/windows.csv`: Extracted test feature matrix.
-* `data/processed/split_report.json`: Full reproducibility and audit report.
-
-### 2. Train Random Forest Classifier
-Run [`train_random_forest.py`](train_random_forest.py) to train an optimized Random Forest and evaluate security metrics:
-
-```bash
-python train_random_forest.py \
-  --train data/processed/train_window/windows.csv \
-  --test data/processed/test_window/windows.csv \
-  --model-out data/models/driver_rf.joblib \
-  --metrics-out data/models/metrics.json \
-  --trees 300
-```
-
-
+* **ESC Neutral Arming:** The firmware holds...
