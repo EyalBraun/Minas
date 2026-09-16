@@ -49,14 +49,14 @@ The project operates across a two-phase lifecycle: **Phase 1 (Data Collection & 
 ```mermaid
 flowchart TD
     subgraph Human["1. Human Input"]
-        PS5["Sony PS5 DualSense Controller\n(Bluetooth Classic HID)"]
+        PS5["Sony PS5 DualSense Controller (Bluetooth Classic HID)"]
     end
 
     subgraph ESP["2. ESP32-WROVER Embedded Core"]
-        SAMPLER["20 Hz Telemetry Sampler\n(Inputs, Actuators, Derivatives)"]
-        RAM_BUF["RAM Circular Buffer\n(40 Samples = 2.0s Window)"]
-        ACT_OUT["Actuator Drivers\n(LEDC PWM 50 Hz)"]
-        TINYML["TinyML Inference Engine\n(Embedded C++ Model)"]
+        SAMPLER["20 Hz Telemetry Sampler (Inputs, Actuators, Derivatives)"]
+        RAM_BUF["RAM Circular Buffer (40 Samples = 2.0s Window)"]
+        ACT_OUT["Actuator Drivers (LEDC PWM 50 Hz)"]
+        TINYML["TinyML Inference Engine (Embedded C++ Model)"]
         GATE{"Driver Authorized?"}
     end
 
@@ -67,31 +67,31 @@ flowchart TD
     end
 
     subgraph Phase1["Phase 1: Offline Training Pipeline"]
-        SD["MicroSD Card\n(/trials/*_segment_XXXXX.csv)"]
+        SD["MicroSD Card (/trials/*_segment_XXXXX.csv)"]
         PC["Training Server / Computer"]
-        PREP["tools_train_driver.py\n(Feature Extraction & 49-Dim Windows)"]
-        RF["train_random_forest.py\n(Balanced Random Forest Classifier)"]
+        PREP["tools_train_driver.py (Feature Extraction & 49-Dim Windows)"]
+        RF["train_random_forest.py (Balanced Random Forest Classifier)"]
     end
 
-    PS5 -->|HID Packets (50 ms)| SAMPLER
+    PS5 -->|"HID Packets (50 ms)"| SAMPLER
     SAMPLER --> RAM_BUF
     SAMPLER --> ACT_OUT
     ACT_OUT --> SERVO
     ACT_OUT --> ESC
 
     %% Phase 1
-    RAM_BUF -.->|During 10-min Trial| SD
-    SD ==>|CSV Transfer| PC
+    RAM_BUF -.->|"During 10-min Trial"| SD
+    SD ==>|"CSV Transfer"| PC
     PC --> PREP
     PREP --> RF
-    RF ==>|Export C++ Array| TINYML
+    RF ==>|"Export C++ Array"| TINYML
 
     %% Phase 2
-    RAM_BUF -->|Every 0.5s Stride| TINYML
+    RAM_BUF -->|"Every 0.5s Stride"| TINYML
     TINYML --> GATE
-    GATE -->|YES: Authorized Owner| ACT_OUT
-    GATE -->|NO: Impostor Detected| BUZZ
-    GATE -->|NO: Impostor Detected| ESC
+    GATE -->|"YES: Authorized Owner"| ACT_OUT
+    GATE -->|"NO: Impostor Detected"| BUZZ
+    GATE -->|"NO: Impostor Detected"| ESC
 ```
 
 ### Operational Phases:
