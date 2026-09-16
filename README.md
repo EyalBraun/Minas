@@ -152,7 +152,7 @@ segment_number,sample_sequence,timestamp_ms,elapsed_ms,label,is_owner,controller
 ```
 
 ### The 49 Sliding-Window Features:
-The preprocessing pipeline slices continuous driving into **40-sample windows** ($2.0\text{ seconds}$ at $20\text{ Hz}$) with a **10-sample step** ($0.5\text{ seconds}$ stride). Across the 12 core numeric dimensions, 4 statistical moments are computed:
+The preprocessing pipeline slices continuous driving into **40-sample windows** (2.0 seconds at 20 Hz) with a **10-sample step** (0.5 seconds stride). Across the 12 core numeric dimensions, 4 statistical moments are computed:
 
 $$\text{Features} = \{\text{mean}, \text{std}, \text{min}, \text{max}\} \times 12\text{ Signals} + \{\text{controller\_connected\_ratio}\} = \mathbf{49\text{ Features}}$$
 
