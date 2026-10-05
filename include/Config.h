@@ -47,10 +47,17 @@
 // ----------------------------------------------------------------------------
 // 5. ACTUATOR & PWM SAFETY LIMITS
 // ----------------------------------------------------------------------------
-// Steering Servo Range (in degrees):
+// Steering Servo Range (in degrees and pulse width):
 #define STEERING_MIN_DEG    0     // Maximum left turn angle
 #define STEERING_MAX_DEG    180   // Maximum right turn angle
 #define STEERING_CENTER_DEG 90    // Straight-ahead neutral position
+
+// Steering Servo Pulse Width Range (in microseconds):
+// Standard RC servo mapping: 1000 µs = Full Left, 1500 µs = Center (90°), 2000 µs = Full Right.
+// Constrained to 1000-2000 µs (instead of 500-2500 µs) to prevent the servo from forcing past
+// the chassis physical steering rack limits and stalling the motor.
+#define SERVO_MIN_US        1000  // Safe left steering limit (prevents mechanical stall against chassis)
+#define SERVO_MAX_US        2000  // Safe right steering limit (prevents mechanical stall against chassis)
 
 // Electronic Speed Controller (ESC) Pulse Width Range (in microseconds):
 // Standard RC ESC mapping: 1000 µs = Full Reverse / Brake, 1500 µs = Neutral, 2000 µs = Full Forward
