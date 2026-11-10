@@ -181,24 +181,35 @@ def main():
         print("\n[!] ERROR: No track contains both Authorized and Unauthorized drivers!")
         return
 
-    # בחירת מסלול מבחן (D בעדיפות ראשונה) ומסלולי אימון
+    # זיהוי המסלולים שבהם נהגו כל סוגי הנהגים (גם מורשה וגם לא-מורשה)
+    unauth_tracks = set(full_df[full_df["is_authorized"] == 0]["track"].unique())
+    auth_tracks = set(full_df[full_df["is_authorized"] == 1]["track"].unique())
+    common_tracks = unauth_tracks.intersection(auth_tracks)
+
+    if not common_tracks:
+        print("\n[!] ERROR: No track contains both Authorized and Unauthorized drivers!")
+        return
+
+    # מסלול המבחן הבלתי-נראה הוא D (אם קיים במסלולים המשותפים)
     if "D" in common_tracks:
         test_track = "D"
-        train_tracks = sorted(list(common_tracks - {"D"}))
+        # מסלולי האימון הם אך ורק המסלולים המשותפים לשני הנהגים למעט מסלול המבחן
+        train_tracks = sorted(list(common_tracks - {test_track}))
         if not train_tracks:
             train_tracks = ["D"]
     else:
         test_track = sorted(list(common_tracks))[-1]
         train_tracks = sorted(list(common_tracks - {test_track}))
 
-    print(f"\n[*] Training on Track(s): {train_tracks}")
-    print(f"[*] Testing on Unseen Track: {test_track}")
+    print(f"\n[*] Common Training Track(s) shared by all drivers: {train_tracks}")
+    print(f"[*] Held-Out Unseen Test Track: {test_track}")
 
+    # שימוש אך ורק במסלולי האימון המשותפים שבהם נהגו גם המורשה וגם הלא-מורשה
     train_df = full_df[full_df["track"].isin(train_tracks)]
     test_df = full_df[full_df["track"] == test_track]
 
     # 2. חילוץ חלונות
-    X_train, y_train = extract_window_features(train_df)
+    X_train, y_train, train_groups = extract_window_features(train_df, return_groups=True)
     X_test, y_test, test_groups = extract_window_features(test_df, return_groups=True)
 
     print(f"\n[*] Extracted Training Windows: {len(X_train)} (Authorized: {np.sum(y_train==1)}, Unauthorized: {np.sum(y_train==0)})")
@@ -211,7 +222,7 @@ def main():
         print("\n[!] ERROR: Test data contains only ONE class.")
         return
 
-    # 3. נרמול מאפיינים (StandardScaler)
+    # 3. נרמול מאפיינים (StandardScaler מחושב אך ורק על נתוני האימון!)
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
@@ -246,80 +257,99 @@ def main():
     nn_model = MLPClassifier(hidden_layer_sizes=(32, 16), max_iter=500, random_state=42)
     nn_model.fit(X_train_bal, y_train_bal)
 
-    # 5. כיול אוטומטי של Decision Threshold ברמת חלון בודד (2.0 שניות)
+    # 5. כיול אובייקטיבי של סף ההחלטה (Threshold) אך ורק על נתוני האימון (מסלולים A, B, C)
+    # בדיקת מסלול D תתבצע באופן עיוור לחלוטין עם הסף הנעול הזה (ללא שום הצצה לנתוני D)!
     results = {}
     print("\n" + "=" * 84)
-    print(f"=== Single-Window (2.0s) Evaluation on Unseen Track {test_track} ===")
+    print(f"=== Blind Evaluation on Unseen Track {test_track} (Threshold Calibrated on {train_tracks}) ===")
     print("=" * 84)
-    print(f"{'Model':<24} | {'Optimal Th':<10} | {'Accuracy':<10} | {'FAR (<5%)':<10} | {'FRR (<10%)'}")
+    print(f"{'Model':<24} | {'Calibrated Th':<13} | {'Accuracy':<10} | {'FAR (<5%)':<10} | {'FRR (<10%)'}")
     print("-" * 84)
 
     models = [("Random Forest", rf_model), ("Tiny Neural Net", nn_model)]
-    probs = {}
+    probs_test = {}
 
     for name, model in models:
         class_1_idx = list(model.classes_).index(1)
-        y_prob = model.predict_proba(X_test_scaled)[:, class_1_idx]
-        probs[name] = y_prob
+        y_prob_train = model.predict_proba(X_train_scaled)[:, class_1_idx]
+        y_prob_test = model.predict_proba(X_test_scaled)[:, class_1_idx]
+        probs_test[name] = y_prob_test
 
+        # כיול הסף על נתוני האימון (A, B, C) בלבד!
         best_th = 0.50
         best_score = -float("inf")
-        best_metrics = (0.0, 100.0, 100.0)
-
         for th in np.arange(0.10, 0.91, 0.01):
-            y_pred_temp = (y_prob >= th).astype(int)
-            acc, far, frr = evaluate_security_metrics(y_test, y_pred_temp)
-
-            # פונקציית מטרה: אופטימיזציית דיוק והורדת שגיאות
-            meets_targets = (far < 5.0) and (frr < 10.0)
-            score = (100.0 if meets_targets else 0.0) + acc - (0.8 * far) - (0.8 * frr)
-
+            y_pred_tr = (y_prob_train >= th).astype(int)
+            acc_tr, far_tr, frr_tr = evaluate_security_metrics(y_train, y_pred_tr)
+            # פונקציית יעד אבטחה: העדפת דיוק תוך מניעת חדירת זר (FAR)
+            score = acc_tr - (1.2 * far_tr) - (0.6 * frr_tr)
             if score > best_score:
                 best_score = score
                 best_th = th
-                best_metrics = (acc, far, frr)
 
-        acc, far, frr = best_metrics
-        results[name] = {"acc": acc, "far": far, "frr": frr, "th": best_th}
-        print(f"{name:<24} | {best_th:>10.2f} | {acc:>8.1f}% | {far:>8.1f}% | {frr:>8.1f}%")
+        # בדיקה עיוורת לחלוטין על מסלול D עם הסף המכויל
+        y_pred_d = (y_prob_test >= best_th).astype(int)
+        acc_d, far_d, frr_d = evaluate_security_metrics(y_test, y_pred_d)
+
+        results[name] = {"acc": acc_d, "far": far_d, "frr": frr_d, "th": best_th}
+        print(f"{name:<24} | {best_th:>13.2f} | {acc_d:>8.1f}% | {far_d:>8.1f}% | {frr_d:>8.1f}%")
 
     print("-" * 84)
 
-    # 6. הערכה ברמת שקלול רכב רציף (Continuous 5-Second Vehicle Buffer)
-    print(f"\n=== Vehicle-Level Continuous Decision (5.0s Rolling Consensus) ===")
+    # 6. הערכה עיוורת ברמת שקלול רכב רציף (Continuous 5-Second Vehicle Buffer)
+    print(f"\n=== Vehicle-Level Continuous Decision (5.0s Rolling Consensus - Blind on Track {test_track}) ===")
     print("-" * 84)
-    print(f"{'Model':<24} | {'Optimal Th':<10} | {'Accuracy':<10} | {'FAR (<5%)':<10} | {'FRR (<10%)'}")
+    print(f"{'Model':<24} | {'Calibrated Th':<13} | {'Accuracy':<10} | {'FAR (<5%)':<10} | {'FRR (<10%)'}")
     print("-" * 84)
 
     rolling_results = {}
-    for name, _ in models:
-        y_prob = probs[name]
-        prob_df = pd.DataFrame({
-            "group": [str(g) for g in test_groups],
-            "prob": y_prob,
-            "y_true": y_test,
+    for name, model in models:
+        class_1_idx = list(model.classes_).index(1)
+        y_prob_train = model.predict_proba(X_train_scaled)[:, class_1_idx]
+        y_prob_test = probs_test[name]
+
+        # 1) חישוב Rolling Mean על מסלולי האימון לצורך כיול הסף
+        df_train_roll = pd.DataFrame({
+            "group": [str(g) for g in train_groups],
+            "prob": y_prob_train,
+            "y_true": y_train,
         })
-        prob_df["roll_prob"] = prob_df.groupby("group", sort=False)["prob"].transform(
+        df_train_roll["roll_prob"] = df_train_roll.groupby("group", sort=False)["prob"].transform(
             lambda s: s.rolling(10, min_periods=1).mean()
         )
 
-        y_true_arr = prob_df["y_true"].values
-        y_roll_arr = prob_df["roll_prob"].values
+        best_roll_th = 0.50
+        best_score = -float("inf")
+        y_tr_arr = df_train_roll["y_true"].values
+        y_roll_tr = df_train_roll["roll_prob"].values
 
-        best_th, best_score, best_metrics = 0.5, -float("inf"), (0.0, 100.0, 100.0)
+        # כיול סף ה-Rolling אך ורק על נתוני האימון (A, B, C)!
         for th in np.arange(0.10, 0.91, 0.01):
-            pred = (y_roll_arr >= th).astype(int)
-            acc, far, frr = evaluate_security_metrics(y_true_arr, pred)
-            meets_targets = (far < 5.0) and (frr < 10.0)
-            score = (100.0 if meets_targets else 0.0) + acc - (0.8 * far) - (0.8 * frr)
+            pred_tr = (y_roll_tr >= th).astype(int)
+            acc_tr, far_tr, frr_tr = evaluate_security_metrics(y_tr_arr, pred_tr)
+            score = acc_tr - (1.2 * far_tr) - (0.6 * frr_tr)
             if score > best_score:
                 best_score = score
-                best_th = th
-                best_metrics = (acc, far, frr)
+                best_roll_th = th
 
-        acc, far, frr = best_metrics
-        rolling_results[name] = {"acc": acc, "far": far, "frr": frr, "th": best_th}
-        print(f"{name + ' (5s)':<24} | {best_th:>10.2f} | {acc:>8.1f}% | {far:>8.1f}% | {frr:>8.1f}%")
+        # 2) בדיקה עיוורת של הסף המכויל על מסלול המבחן D
+        df_test_roll = pd.DataFrame({
+            "group": [str(g) for g in test_groups],
+            "prob": y_prob_test,
+            "y_true": y_test,
+        })
+        df_test_roll["roll_prob"] = df_test_roll.groupby("group", sort=False)["prob"].transform(
+            lambda s: s.rolling(10, min_periods=1).mean()
+        )
+
+        y_true_test = df_test_roll["y_true"].values
+        y_roll_test = df_test_roll["roll_prob"].values
+
+        pred_d = (y_roll_test >= best_roll_th).astype(int)
+        acc_d, far_d, frr_d = evaluate_security_metrics(y_true_test, pred_d)
+
+        rolling_results[name] = {"acc": acc_d, "far": far_d, "frr": frr_d, "th": best_roll_th}
+        print(f"{name + ' (5s)':<24} | {best_roll_th:>13.2f} | {acc_d:>8.1f}% | {far_d:>8.1f}% | {frr_d:>8.1f}%")
 
     print("-" * 84)
 
