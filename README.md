@@ -236,6 +236,7 @@ pio device monitor --port COM3
 Minas/
 ├── HILM/
 │   ├── Data/                           # Recorded 20 Hz telemetry CSVs (hidden in Explorer/IDE)
+│   ├── forza.py                        # 10-minute Forza UDP (Port 5000) 20 Hz telemetry logger
 │   ├── model.py                        # 12-feature ML training, Track A->D evaluation & export
 │   ├── live_detector.py                # Real-time Forza UDP (Port 5000) & Demo Biometric Guard + HUD
 │   ├── minas_live_model.pkl            # Exported model bundle (Tiny NN, Random Forest, Scaler)

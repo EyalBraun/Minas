@@ -9,3 +9,5 @@ __pycache__/
 
 # Hide recorded biometric telemetry data
 HILM/Data/*.csv
+#Hide the current results
+HILM/forza_real_results_graph.png
