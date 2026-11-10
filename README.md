@@ -24,44 +24,6 @@ Traditional automotive anti-theft security relies on **one-time static authentic
 
 ![System Architecture & Data Flow](docs/images/system_flow.png)
 
-```mermaid
-flowchart TD
-    subgraph Input["1. Driver Control Input (20 Hz)"]
-        PS5["Sony PS5 DualSense Controller (ESP32 Bluetooth)"]
-        FORZA["Forza Horizon / Motorsport (UDP Port 5000)"]
-    end
-
-    subgraph Core["2. Telemetry & Sliding Window Engine"]
-        SAMPLER["20 Hz Control Sampler (Throttle, Brake, Steering, Derivatives)"]
-        BUF["Circular Buffer (2.0s Sliding Window, 0.5s Stride)"]
-        FEAT["Behavioral Biometric Feature Extractor"]
-    end
-
-    subgraph ML["3. Continuous Authentication"]
-        IDLE_CHK{"Vehicle Moving?"}
-        MODEL["TinyML Classifier (Random Forest / Tiny NN)"]
-        STREAK{"8 Consecutive Unauth Windows?"}
-    end
-
-    subgraph Action["4. Real-Time Mitigation"]
-        IDLE_ST["⏸ IDLE (Buzzer OFF)"]
-        AUTH_ST["✔ AUTHORIZED (Green | Buzzer OFF)"]
-        UNAUTH_ST["🚨 UNAUTHORIZED (Red | Buzzer ON + Safe Stop)"]
-    end
-
-    PS5 --> SAMPLER
-    FORZA --> SAMPLER
-    SAMPLER --> BUF
-    BUF --> IDLE_CHK
-    IDLE_CHK -->|"No"| IDLE_ST
-    IDLE_CHK -->|"Yes"| FEAT
-    FEAT --> MODEL
-    MODEL --> STREAK
-    STREAK -->|"No"| AUTH_ST
-    STREAK -->|"Yes"| UNAUTH_ST
-```
-
----
 
 ## ⚡ Hardware Architecture & Electrical Schematic
 
