@@ -3,3 +3,9 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Hide recorded biometric telemetry data
+HILM/Data/*.csv

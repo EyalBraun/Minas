@@ -1,12 +1,12 @@
-# Minas: Continuous Driver Authentication Using TinyML on ESP32
+# Minas: Continuous Driver Authentication Using Behavioral Biometrics & TinyML
 
 [![PlatformIO Build](https://img.shields.io/badge/PlatformIO-ESP32--WROVER-orange.svg)](https://platformio.org/)
 [![Firmware](https://img.shields.io/badge/Firmware-C%2B%2B17%20%7C%20FreeRTOS-blue.svg)](https://isocpp.org/)
-[![Machine Learning](https://img.shields.io/badge/ML-Python%20%7C%20Random%20Forest%20%7C%20TinyML-brightgreen.svg)](https://scikit-learn.org/)
-[![Hardware](https://img.shields.io/badge/Hardware-ESP32--WROVER%20%7C%20MicroSD%20%7C%20PS5-red.svg)](https://www.espressif.com/)
+[![Machine Learning](https://img.shields.io/badge/ML-Python%20%7C%20Random%20Forest%20%7C%20Tiny%20NN-brightgreen.svg)](https://scikit-learn.org/)
+[![Live PoC](https://img.shields.io/badge/Live%20PoC-Forza%20UDP%20Port%205000%20%7C%20HUD-purple.svg)](#%EF%B8%8F-real-time-biometric-guard-poc--forza-telemetry)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An autonomous, embedded cyber-physical security system that continuously identifies and authenticates an RC vehicle driver in real time using **Behavioral Biometrics** and **Edge TinyML (Tiny Machine Learning)** running directly on an ultra-low-cost **ESP32-WROVER** microcontroller.
+An autonomous cyber-physical security system that continuously authenticates a vehicle driver in real time using **Neuromotor Behavioral Biometrics** and **TinyML (Tiny Machine Learning)**—combining an **ESP32-WROVER** embedded platform for physical RC vehicles with a **Hardware-in-the-Loop / Live Forza UDP Biometric Guard (`HILM`)**.
 
 ---
 
@@ -14,305 +14,218 @@ An autonomous, embedded cyber-physical security system that continuously identif
 1. [Executive Summary & Vision](#-executive-summary--vision)
 2. [End-to-End System Architecture & Data Flow](#-end-to-end-system-architecture--data-flow)
 3. [Hardware Architecture & Electrical Wiring](#-hardware-architecture--electrical-wiring)
-4. [Vehicle Control Scheme (Option A) & PS5 Integration](#-vehicle-control-scheme-option-a--ps5-integration)
-5. [Experimental Protocol & 10-Minute Trial Collection](#-experimental-protocol--10-minute-trial-collection)
-6. [Telemetry & Sliding-Window Feature Schema](#-telemetry--sliding-window-feature-schema)
-7. [Machine Learning Pipeline & Model Training](#-machine-learning-pipeline--model-training)
-8. [Firmware Architecture & Hardware Timer Safety](#-firmware-architecture--hardware-timer-safety)
-9. [Build, Flash & Verification Guide](#-build-flash--verification-guide)
-10. [Repository Structure](#-repository-structure)
-11. [Academic References & License](#-academic-references--license)
+4. [Vehicle Control Scheme & PS5 Integration](#-vehicle-control-scheme--ps5-integration)
+5. [Experimental Protocol & Multi-Track Evaluation](#-experimental-protocol--multi-track-evaluation)
+6. [Telemetry Schema & 12-Feature Behavioral Signature](#-telemetry-schema--12-feature-behavioral-signature)
+7. [Machine Learning Pipeline (`HILM/model.py`)](#-machine-learning-pipeline-hilmmodelpy)
+8. [Real-Time Biometric Guard PoC & Forza Telemetry (`HILM/live_detector.py`)](#%EF%B8%8F-real-time-biometric-guard-poc--forza-telemetry-hilmlive_detectorpy)
+9. [Firmware Architecture & Hardware Timer Safety](#%EF%B8%8F-firmware-architecture--hardware-timer-safety)
+10. [Build, Flash & Verification Guide](#%EF%B8%8F-build-flash--verification-guide)
+11. [Repository Structure](#-repository-structure)
+12. [Academic References & License](#-academic-references--license)
 
 ---
 
 ## 🚀 Executive Summary & Vision
 
-Traditional automotive anti-theft security relies on **one-time static authentication at startup** (physical keys, smart fobs, keyless entry, or fingerprint push-buttons). Once the vehicle is in motion, traditional systems suffer from critical security blind spots:
-* **Relay Attacks & Fob Cloning:** Stolen or electronically cloned credentials allow unauthorized vehicle operation.
-* **Carjacking & Coercion:** If a vehicle is forcibly taken while running, the vehicle cannot determine that the authorized driver is no longer at the controls.
-* **Fleet & Commercial Security:** Logistics operators, car-sharing services, and rental fleets cannot continuously verify driver identity without privacy-invasive cameras.
+Traditional automotive anti-theft security relies on **one-time static authentication at startup** (physical keys, smart fobs, or immobilizers). Once the vehicle is in motion, static authentication fails against:
+* **Relay Attacks & Key Cloning:** Stolen or relayed credentials grant full operational control.
+* **Mid-Session Carjacking & Handover:** If an unauthorized person takes the wheel while the vehicle is already running, static systems cannot detect the change of driver.
+* **Privacy-Invasive Cameras:** Cabin-facing biometric cameras raise privacy concerns and struggle with lighting or occlusions.
 
 ### The Minas Solution: Zero-Trust Continuous Behavioral Biometrics
-**Minas** introduces an active, embedded security gatekeeper:
-1. **Neuromotor Behavioral Biometrics:** Every human driver possesses a unique, subconscious "motor signature"—fine-grained steering micro-adjustments, trigger pressure gradients, throttle onset rates, and control derivative profiles ($\Delta\text{Steering}, \Delta\text{Throttle}$).
-2. **Edge AI / TinyML:** Instead of streaming high-frequency telemetry to a vulnerable remote cloud server (introducing network latency, connectivity dependency, and privacy risks), classification is performed **100% locally on the ESP32-WROVER**.
-3. **Active Cyber-Physical Mitigation:** When an unauthorized driver operates the vehicle, the microcontroller triggers an instant hardware failsafe: neutralizes the Electronic Speed Controller (ESC 1500 µs), centers the steering, and activates an acoustic alarm buzzer.
+**Minas** introduces an active, non-intrusive security gatekeeper based purely on **how the driver operates the controls**:
+1. **Neuromotor Behavioral Biometrics:** Every human driver exhibits a subconscious motor signature—steering micro-corrections, pedal onset rates, braking transitions, and derivative profiles ($\Delta\text{Steering}/\Delta t$, $\Delta\text{Throttle}/\Delta t$).
+2. **Track-Invariant Feature Extraction:** By focusing on control derivatives, micro-correction reversals, and pedal aggression rather than raw steering angles, the model recognizes the driver even on **completely unseen tracks**.
+3. **Active Cyber-Physical Mitigation:** When **8 consecutive sliding windows** ($4.0\text{ seconds}$) confirm an unauthorized driver, the system triggers an acoustic alarm buzzer and neutralizes vehicle actuation.
 
 ---
 
 ## 🔄 End-to-End System Architecture & Data Flow
 
-The project operates across a two-phase lifecycle: **Phase 1 (Data Collection & Training)** and **Phase 2 (Edge Inference & Cyber-Physical Protection)**.
+The project operates across both an **ESP32-WROVER Physical RC Platform** and a **Real-Time HILM / Forza Telemetry Proof-of-Concept (PoC)**:
 
 ![System Architecture & Data Flow](docs/images/system_flow.png)
 
 ```mermaid
 flowchart TD
-    subgraph Human["1. Human Input"]
-        PS5["Sony PS5 DualSense Controller (Bluetooth Classic HID)"]
+    subgraph Input["1. Driver Control Input (20 Hz)"]
+        PS5["Sony PS5 DualSense Controller (ESP32 Bluetooth)"]
+        FORZA["Forza Horizon / Motorsport (UDP Data Out Port 5000)"]
     end
 
-    subgraph ESP["2. ESP32-WROVER Embedded Core"]
-        SAMPLER["20 Hz Telemetry Sampler (Inputs, Actuators, Derivatives)"]
-        RAM_BUF["RAM Circular Buffer (40 Samples = 2.0s Window)"]
-        ACT_OUT["Actuator Drivers (LEDC PWM 50 Hz)"]
-        TINYML["TinyML Inference Engine (Embedded C++ Model)"]
-        GATE{"Driver Authorized?"}
+    subgraph Core["2. Telemetry & Sliding Window Engine"]
+        SAMPLER["20 Hz Normalized Telemetry (Throttle, Brake, Steering, Derivatives)"]
+        BUF["Circular Buffer (40 Samples = 2.0s Window, 0.5s Stride)"]
+        FEAT["12-Feature Behavioral Biometric Extractor"]
     end
 
-    subgraph Physical["3. Vehicle Actuators"]
-        SERVO["Steering Servo (GPIO 25)"]
-        ESC["Traction ESC (GPIO 26)"]
-        BUZZ["Piezo Buzzer (GPIO 32)"]
+    subgraph ML["3. Classification & Consensus (`HILM`)"]
+        MODEL["Trained Tiny Neural Net / Random Forest (`minas_live_model.pkl`)"]
+        IDLE_CHK{"Vehicle Moving?"}
+        STREAK{"8 Consecutive Unauth Windows?"}
     end
 
-    subgraph Phase1["Phase 1: Offline Training Pipeline"]
-        SD["MicroSD Card (/trials/*_segment_XXXXX.csv)"]
-        PC["Training Server / Computer"]
-        PREP["tools_train_driver.py (Feature Extraction & 49-Dim Windows)"]
-        RF["train_random_forest.py (Balanced Random Forest Classifier)"]
+    subgraph Action["4. Real-Time Mitigation & HUD"]
+        IDLE_ST["⏸ IDLE (Buzzer OFF)"]
+        AUTH_ST["✔ AUTHORIZED (Green HUD | Buzzer OFF)"]
+        UNAUTH_ST["🚨 UNAUTHORIZED (Red Flashing HUD | Buzzer ON + Safe Stop)"]
     end
 
-    PS5 -->|"HID Packets (50 ms)"| SAMPLER
-    SAMPLER --> RAM_BUF
-    SAMPLER --> ACT_OUT
-    ACT_OUT --> SERVO
-    ACT_OUT --> ESC
-
-    %% Phase 1
-    RAM_BUF -.->|"During 10-min Trial"| SD
-    SD ==>|"CSV Transfer"| PC
-    PC --> PREP
-    PREP --> RF
-    RF ==>|"Export C++ Array"| TINYML
-
-    %% Phase 2
-    RAM_BUF -->|"Every 0.5s Stride"| TINYML
-    TINYML --> GATE
-    GATE -->|"YES: Authorized Owner"| ACT_OUT
-    GATE -->|"NO: Impostor Detected"| BUZZ
-    GATE -->|"NO: Impostor Detected"| ESC
+    PS5 --> SAMPLER
+    FORZA --> SAMPLER
+    SAMPLER --> BUF
+    BUF --> IDLE_CHK
+    IDLE_CHK -->|"No (Stationary)"| IDLE_ST
+    IDLE_CHK -->|"Yes (Driving)"| FEAT
+    FEAT --> MODEL
+    MODEL --> STREAK
+    STREAK -->|"No (< 8 Windows)"| AUTH_ST
+    STREAK -->|"Yes (>= 8 Windows)"| UNAUTH_ST
 ```
-
-### Operational Phases:
-1. **Phase 1 — Ground Truth Data Collection:**
-   - The ESP32 samples user inputs and vehicle commands at a strict **20 Hz rate (every 50 ms)**.
-   - Telemetry is buffered in RAM and streamed directly to an onboard MicroSD card via 1-bit SDMMC.
-   - Structured 10-minute trials are recorded for the legitimate **Owner** (Circle button) and **Non-Owner Impostors** (Square button).
-   - Completed CSV logs are transferred to a PC for automated sliding-window feature extraction and model training.
-2. **Phase 2 — Real-Time Edge Inference:**
-   - The trained classifier is compiled into the ESP32 firmware.
-   - Live driving dynamics are evaluated across a **2.0-second sliding window** (40 samples, stepped every 0.5 seconds).
-   - If an unauthorized driver is detected, the ESP32 overrides control, shuts down the motor, and sounds the alarm.
 
 ---
 
 ## ⚡ Hardware Architecture & Electrical Wiring
 
-Reliable operation of high-current actuators alongside an RF-sensitive microcontroller requires clean electrical isolation and a unified ground plane.
+Reliable operation of high-current RC actuators alongside an RF-sensitive ESP32-WROVER microcontroller requires clean electrical isolation and a unified ground plane.
 
 ![Electrical Wiring Schematic](docs/images/wiring_schematic.png)
 
-### Complete Wiring & Pinout Table
+### Complete Wiring & Pinout Table (`include/Config.h`)
 
 | Peripheral | Board Pin | Electrical Spec | Subsystem Function |
 |---|---|---|---|
-| **Steering Servo Signal** | `GPIO 25` | 3.3V Logic PWM (50 Hz, 1000–2000 µs) | Controls steering angle ($0^\circ$ to $180^\circ$, neutral $90^\circ$). Safe travel limits prevent chassis stall. |
+| **Steering Servo Signal** | `GPIO 25` | 3.3V Logic PWM (50 Hz, 1000–2000 µs) | Controls steering angle ($0^\circ$ to $180^\circ$, neutral $90^\circ$). |
 | **ESC Throttle Signal** | `GPIO 26` | 3.3V Logic PWM (50 Hz) | Electronic Speed Controller throttle ($1000\,\mu\text{s}$ to $2000\,\mu\text{s}$, neutral $1500\,\mu\text{s}$). |
 | **Piezo Buzzer (+)** | `GPIO 32` | 3.3V Square Wave (`safeBeep`) | Acoustic feedback without LEDC timer hijacking. |
-| **MicroSD Card Bus** | `GPIO 2, 14, 15` | 1-bit Hardware SDMMC | High-speed logging (D0: GPIO 2, CLK: GPIO 14, CMD: GPIO 15). |
+| **MicroSD Card Bus** | `GPIO 2, 14, 15` | 1-bit Hardware SDMMC | High-speed 20 Hz telemetry logging (D0: GPIO 2, CLK: GPIO 14, CMD: GPIO 15). |
 | **Internal SPI PSRAM** | `GPIO 16, 17` | Reserved (Do Not Wire!) | Dedicated to 4MB onboard Pseudo-Static RAM. |
 | **Internal SPI Flash** | `GPIO 6–11` | Reserved (Do Not Wire!) | Dedicated to onboard 4MB SPI Flash memory. |
 
-### ⚠️ Critical Electrical Design Rules:
-1. **Common Ground (GND) Bus:** All grounds (Main Battery GND, Secondary 5V GND, ESP32 GND, Servo GND, ESC GND, Buzzer GND) **must be tied together** to establish a shared reference potential for PWM signals.
-2. **Isolated Servo Power:** **Never power an RC servo from the ESP32 3.3V or 5V USB pin!** High-torque servos draw $1.0\text{A}$ to $2.5\text{A}$ stall current during steering turns. Power the servo from a dedicated **Regulated Secondary 5V supply** (UBEC or separate $5\text{V}$–$6\text{V}$ pack).
-3. **ESC BEC Isolation:** When using a dedicated secondary 5V pack for the microcontroller and servo, the red wire ($5\text{V}$ BEC) of the ESC receiver plug must be disconnected/insulated to prevent regulator cross-currents.
-
 ---
 
-## 🎮 Vehicle Control Scheme (Option A) & PS5 Integration
+## 🎮 Vehicle Control Scheme & PS5 Integration
 
-Minas uses standard automotive dual-trigger control (**Option A**), configured specifically for the Sony PS5 DualSense controller:
+Minas uses standard automotive dual-trigger control configured in [`src/main.cpp`](src/main.cpp) for the Sony PS5 DualSense controller:
 
-| Control Input | Controller Action | Vehicle Response | Data Mapping Range |
+| Control Input | Controller Action | Vehicle Response | Normalized Telemetry Output |
 |---|---|---|---|
-| **Steering** | **Left Stick (X-Axis)** | Steers front wheels Left / Right | $-128 \dots +127 \longrightarrow 0^\circ \dots 180^\circ$ (Center: $90^\circ$) |
-| **Throttle** | **R2 Analog Trigger** | Progressive Forward Acceleration | $0 \dots 255 \longrightarrow 0.0\% \dots +100.0\%$ ($1500 \dots 2000\,\mu\text{s}$) |
-| **Brake / Reverse** | **L2 Analog Trigger** | Progressive Braking / Reverse Drive | $0 \dots 255 \longrightarrow 0.0\% \dots -100.0\%$ ($1500 \dots 1000\,\mu\text{s}$) |
-| **Owner Trial** | **Circle (○) Button** | Starts 10-Minute Recorded Owner Trial | Emits $2200\text{ Hz}$ confirmation chime |
-| **Non-Owner Trial** | **Square (□) Button** | Starts 10-Minute Recorded Non-Owner Trial | Emits $1200\text{ Hz}$ confirmation chime |
-| **Cancel / Finish** | **Cross (✕) Button** | Cancel ($<10\text{ min}$) or Finish ($\ge 10\text{ min}$) | Warning buzz or high victory chime |
-
-### Built-in Deadband & Safety Features:
-* **Trigger Deadband (20 units):** Prevents creeping caused by the physical resting weight of the DualSense controller on a flat surface.
-* **Steering Deadband (10 units):** Eliminates center stick drift.
-* **ESC Neutral Arming:** The firmware holds neutral ($1500\,\mu\text{s}$) for 2.0 seconds at boot to properly calibrate and arm the ESC.
-* **Controller Disconnect Failsafe:** If Bluetooth connection is lost, failsafe activates within $50\text{ ms}$ (motor stops, steering centers).
+| **Steering** | **Left Stick (X-Axis)** | Steers front wheels Left / Right | `steering` $\in [-1.0, +1.0]$ |
+| **Throttle** | **R2 Analog Trigger** | Progressive Forward Acceleration | `throttle` $\in [0.0, 1.0]$ |
+| **Brake / Reverse** | **L2 Analog Trigger** | Progressive Braking / Reverse Drive | `brake` $\in [0.0, 1.0]$ |
+| **Track Selection** | **D-Pad (Up/Right/Down/Left) or △** | Selects Track `A`, `B`, `C`, or `D` | `track` $\in \{\text{A, B, C, D}\}$ |
+| **Authorized Trial** | **Circle (○) Button** | Starts 10-Minute Authorized Trial (`is_authorized=1`) | Emits $2200\text{ Hz}$ confirmation chime |
+| **Unauthorized Trial** | **Square (□) Button** | Starts 10-Minute Unauthorized Trial (`is_authorized=0`) | Emits $1200\text{ Hz}$ confirmation chime |
+| **Cancel / Finish** | **Cross (✕) Button** | Stops & preserves trial on MicroSD | Emits warning tone or completion chime |
 
 ---
 
-## ⏱️ Experimental Protocol & 10-Minute Trial Collection
+## ⏱️ Experimental Protocol & Multi-Track Evaluation
 
-To prevent machine learning models from merely memorizing a specific track layout rather than learning true behavioral biometrics, data collection follows a structured **multi-driver, multi-track protocol**:
+To ensure the machine learning models learn **driver-specific neuromotor signatures** rather than memorizing a specific road geometry, training and evaluation use strict **Cross-Track Generalization**:
 
-```
-+-----------------------------------------------------------------------------+
-|                          EXPERIMENTAL TRACK SUITE                           |
-+-----------------------------------------------------------------------------+
-|  Track A (Straight Line)  | Long straightaway: high-speed acceleration,     |
-|                           | threshold braking, and launch dynamics.         |
-+---------------------------+-------------------------------------------------+
-|  Track B (Curved Course)  | 90° hairpin turns, sweeping wide bends,         |
-|                           | and rapid directional transitions.              |
-+---------------------------+-------------------------------------------------+
-|  Track C (Slalom Course)  | Variable-spaced cone obstacles requiring rapid, |
-|                           | continuous steering adjustments.                |
-+---------------------------+-------------------------------------------------+
-|  Track D (Held-Out Test)  | COMPLETELY UNSEEN course configuration used     |
-|                           | EXCLUSIVELY to test model generalization!       |
-+-----------------------------------------------------------------------------+
-```
-
-### Dataset Structure (16 Complete Trials = 160 Minutes of Driving):
-* **1 Authorized Owner:** 4 trials $\times$ 10 min = 40 minutes total.
-* **3 Impostor Non-Owners:** 4 trials $\times$ 10 min each = 120 minutes total.
-* **Strict Whole-Session Split:** The held-out evaluation dataset uses completely independent session files to prevent **data leakage** across overlapping time windows.
+* **Track A / B / C (Training Courses):** Used to learn the driver's pedal and steering dynamics across straightaways, hairpins, and slaloms.
+* **Track D (Held-Out Unseen Evaluation Track):** Completely excluded from training (`Train on Track A -> Test on Unseen Track D`), proving that the classifier identifies the human driver on an unfamiliar course.
 
 ---
 
-## 📊 Telemetry & Sliding-Window Feature Schema
+## 📊 Telemetry Schema & 12-Feature Behavioral Signature
 
-### Raw CSV Format (Recorded at 20 Hz / Every 50 ms)
-Files are stored under `/trials/owner_segment_XXXXX.csv` or `/trials/nonowner_segment_XXXXX.csv`. Each file begins with metadata headers followed by 20 data columns:
+### Unified 10-Column Raw CSV Format (20 Hz / Every 50 ms)
+Both the ESP32 firmware ([`src/main.cpp`](src/main.cpp)) and the HILM pipeline ([`HILM/model.py`](HILM/model.py)) use the exact same 10-column CSV structure:
 
 ```csv
-schema_version=3
-firmware_version=minas-10min-no-sonar-v3
-label=owner
-is_owner=1
-sample_interval_ms=50
-planned_duration_ms=600000
-features=controller_and_actuators_only
----
-segment_number,sample_sequence,timestamp_ms,elapsed_ms,label,is_owner,controller_connected,raw_lx,raw_ly,raw_rx,raw_ry,l2,r2,buttons_mask,steering_deg,throttle_percent,steering_command_deg,esc_command_us,steering_delta,throttle_delta
+timestamp_s,driver_name,is_authorized,track,run_number,throttle,brake,steering,d_throttle,d_steering
+0.000,Authorized,1,A,1,0.0000,0.0000,0.0000,0.0000,0.0000
+0.050,Authorized,1,A,1,0.2002,0.0000,0.0154,0.3005,-0.0089
 ```
 
-### The 49 Sliding-Window Features:
-The preprocessing pipeline slices continuous driving into **40-sample windows** ($2.0\text{ seconds}$ at $20\text{ Hz}$) with a **10-sample step** ($0.5\text{ seconds}$ stride). Across the 12 core numeric dimensions, 4 statistical moments are computed:
+### The 12 Track-Invariant Behavioral Biometric Features
+Continuous telemetry is sliced into **2.0-second sliding windows** ($40\text{ samples}$ at $20\text{ Hz}$) stepped every **0.5 seconds** ($10\text{ samples}$). For each window, [`extract_window_features`](HILM/model.py) computes **12 neuromotor features**:
 
-$$\text{Features} = \{\text{mean}, \text{std}, \text{min}, \text{max}\} \times 12\text{ Signals} + \{\text{controller\_connected\_ratio}\} = \mathbf{49\text{ Features}}$$
-
-1. `raw_lx` (Steering stick X)
-2. `raw_ly` (Left stick Y)
-3. `raw_rx` (Right stick X)
-4. `raw_ry` (Right stick Y)
-5. `l2` (Brake/Reverse trigger)
-6. `r2` (Throttle trigger)
-7. `steering_deg` (Normalized steering intent: $0^\circ \dots 180^\circ$)
-8. `throttle_percent` (Net signed throttle: $-100\% \dots +100\%$)
-9. `steering_command_deg` (Actuator steering command)
-10. `esc_command_us` (Actuator ESC pulse: $1000 \dots 2000\,\mu\text{s}$)
-11. `steering_delta` (First derivative $\Delta\text{Steering}/\Delta t$)
-12. `throttle_delta` (First derivative $\Delta\text{Throttle}/\Delta t$)
+1. **Steering Velocity Mean** ($\text{mean}(|\Delta\text{steering}/\Delta t|)$)
+2. **Steering Velocity Std** ($\text{std}(\Delta\text{steering}/\Delta t)$)
+3. **Steering Peak Jerk** ($90\text{th percentile}(|\Delta\text{steering}/\Delta t|)$)
+4. **Steering Micro-Correction Rate** (Zero-crossing frequency of $\Delta\text{steering}/\Delta t$)
+5. **Throttle Aggression Mean** ($\text{mean}(|\Delta\text{throttle}/\Delta t|)$)
+6. **Throttle Aggression Std** ($\text{std}(\Delta\text{throttle}/\Delta t)$)
+7. **Full-Throttle Commitment Ratio** (Fraction of window with $\text{throttle} > 0.85$)
+8. **Coast / Off-Throttle Ratio** (Fraction of window with $\text{throttle} < 0.05$)
+9. **Mean Throttle Intensity** ($\text{mean}(\text{throttle})$)
+10. **Brake Intensity Mean** ($\text{mean}(\text{brake})$)
+11. **Brake Modulation Variability** ($\text{std}(\text{brake})$)
+12. **Pedal Transition Activity** (Active braking ratio with $\text{brake} > 0.05$)
 
 ---
 
-## 🧠 Machine Learning Pipeline & Model Training
+## 🧠 Machine Learning Pipeline (`HILM/model.py`)
 
-### 1. Extract Features & Split Dataset
-Run [`tools_train_driver.py`](tools_train_driver.py) to validate trial logs, perform a balanced class-stratified split (12 training files, 4 held-out evaluation files), and generate tabular sliding windows:
-
-```bash
-python tools_train_driver.py \
-  --data-dir data/raw \
-  --out-dir data/processed \
-  --window 40 \
-  --stride 10 \
-  --seed 20260908
-```
-
-**Output Artifacts:**
-* `data/processed/train_raw/`: 12 training trial CSVs (6 owner, 6 non-owner).
-* `data/processed/test_raw/`: 4 held-out evaluation CSVs (2 owner, 2 non-owner).
-* `data/processed/train_window/windows.csv`: Extracted training feature matrix.
-* `data/processed/test_window/windows.csv`: Extracted test feature matrix.
-* `data/processed/split_report.json`: Full reproducibility and audit report.
-
-### 2. Train Random Forest Classifier
-Run [`train_random_forest.py`](train_random_forest.py) to train an optimized Random Forest and evaluate security metrics:
+Run [`HILM/model.py`](HILM/model.py) to train both the **Random Forest** and **Tiny Neural Network (MLP 24→12→1)** classifiers on Track A, evaluate cross-track generalization on unseen Track D, plot the benchmark comparison graph, and export the calibrated model bundle:
 
 ```bash
-python train_random_forest.py \
-  --train data/processed/train_window/windows.csv \
-  --test data/processed/test_window/windows.csv \
-  --model-out data/models/driver_rf.joblib \
-  --metrics-out data/models/metrics.json \
-  --trees 300
+python HILM/model.py
 ```
 
-### Security Benchmark Targets:
-* **Classification Accuracy:** $> 90.0\%$
-* **False Acceptance Rate (FAR):** $< 5.0\%$ (Strict priority: unauthorized drivers must not gain control)
-* **False Rejection Rate (FRR):** $< 10.0\%$
-* **Inference Latency on ESP32:** $< 50\text{ ms}$ per evaluation window
+### Output Artifacts in `HILM/`:
+* [`HILM/forza_real_results_graph.png`](HILM/forza_real_results_graph.png): Visual benchmark comparing Random Forest and Tiny Neural Net against project targets (`Accuracy > 90%`, `FAR < 5%`, `FRR < 10%`) alongside a 10-second behavioral dynamics trace.
+* [`HILM/minas_live_model.pkl`](HILM/minas_live_model.pkl): Serialized model bundle (`nn_model`, `rf_model`, `StandardScaler`, and calibrated threshold) ready for real-time inference.
+
+![Minas Benchmark & Behavioral Signature](HILM/forza_real_results_graph.png)
+
+---
+
+## 🖥️ Real-Time Biometric Guard PoC & Forza Telemetry (`HILM/live_detector.py`)
+
+[`HILM/live_detector.py`](HILM/live_detector.py) provides an interactive, real-time demonstration of continuous driver authentication with an **Always-On-Top HUD Overlay** and **Acoustic Buzzer**:
+
+### Key Real-Time Features:
+* **Clean Binary HUD Overlay:** Displays only the authentication state (`✔ AUTHORIZED` in Green, `⏸ IDLE` in Grey when stationary, or `🚨 UNAUTHORIZED 🚨` in flashing Red) and the Buzzer state (`🔇 BUZZER: OFF` / `🔊 BUZZER: ON (BUZZING)`).
+* **Stationary (`IDLE`) Detection:** Automatically detects when the vehicle is standing still ($v < 0.8\text{ m/s}$ or zero pedal/steering input for $2.0\text{s}$), displays `⏸ IDLE`, and suppresses false alarms.
+* **8-Window Consecutive Alarm Consensus:** To prevent ear fatigue and false alarms on isolated corners, the alarm triggers only after **8 adjacent windows ($4.0\text{ seconds}$)** confirm an unauthorized driver, emitting a short acoustic beep once every 8 unauthorized windows.
+
+### Mode 1: Live Forza Horizon / Motorsport Telemetry (UDP Port 5000)
+1. In **Forza Horizon 4 / 5** or **Forza Motorsport**, open **Settings → HUD and Gameplay**:
+   * **Data Out:** `ON`
+   * **Data Out IP Address:** `127.0.0.1`
+   * **Data Out IP Port:** `5000`
+2. Launch the live detector:
+```bash
+python HILM/live_detector.py --mode forza --port 5000
+```
+
+### Mode 2: Offline Live Handover Simulation (No Game Required)
+Replays unseen Track D telemetry in real time—starting with 10 seconds of the **Authorized** driver followed by an instant mid-drive handover to an **Unauthorized** driver:
+```bash
+python HILM/live_detector.py --mode demo
+```
 
 ---
 
 ## 🛡️ Firmware Architecture & Hardware Timer Safety
 
-### The ESP32 `tone()` LEDC Timer Conflict (Root Cause & Resolution)
-On the ESP32 architecture, the Arduino core function `tone()` shares the same 4 hardware LEDC timers used by the `ESP32Servo` library for 50 Hz PWM generation:
-* **The Vulnerability:** Calling `tone(pin, freq)` reconfigures the underlying timer frequency from $50\text{ Hz}$ to the audio frequency (e.g., $1800\text{ Hz}$). When the audio stops, the timer is left corrupted.
-* **The Physical Symptom:** The ESC receives an ultra-high frequency signal interpreted as $100\%$ Full Throttle, causing the car to launch unexpectedly, while the steering servo freezes in place.
-* **The Minas Solution (`safeBeep`):** The firmware eliminates all calls to `tone()`. Audio feedback is generated using `safeBeep(freq, duration)`, a non-blocking bit-banged routine that toggles `BUZZER_PIN` with microsecond precision **without touching or altering any hardware PWM timers**:
-
-```cpp
-void safeBeep(uint32_t freqHz, uint32_t durationMs) {
-    if (freqHz == 0 || durationMs == 0) return;
-    uint32_t periodUs = 1000000UL / freqHz;
-    uint32_t halfPeriodUs = periodUs / 2;
-    uint32_t cycles = (durationMs * 1000UL) / periodUs;
-    for (uint32_t i = 0; i < cycles; i++) {
-        digitalWrite(BUZZER_PIN, HIGH);
-        delayMicroseconds(halfPeriodUs);
-        digitalWrite(BUZZER_PIN, LOW);
-        delayMicroseconds(halfPeriodUs);
-    }
-}
-```
+On the ESP32, the standard Arduino `tone()` function reconfigures hardware LEDC timers shared with `ESP32Servo`, which can corrupt the 50 Hz ESC signal. [`src/main.cpp`](src/main.cpp) eliminates all `tone()` calls and uses `safeBeep(freqHz, durationMs)`, a deterministic bit-banged audio generator on `GPIO 32` that leaves hardware PWM timers completely untouched.
 
 ---
 
 ## 🛠️ Build, Flash & Verification Guide
 
-### Prerequisites
-* [PlatformIO](https://platformio.org/) installed in VS Code or PlatformIO Core CLI.
-* Python 3.10+ with `pandas`, `scikit-learn`, `joblib`.
-
-### 1. Set Controller Bluetooth MAC Address
-Open [`include/Config.h`](include/Config.h) and set your PS5 controller's Bluetooth MAC address:
-```cpp
-#define PS5_CONTROLLER_MAC "14:3a:9a:d1:f4:0a"
+### 1. Python Dependencies (`HILM`)
+```bash
+pip install numpy pandas scikit-learn matplotlib joblib
 ```
 
-### 2. Compile & Flash Firmware
+### 2. ESP32 Firmware (`PlatformIO`)
+Configure your DualSense Bluetooth MAC address in [`include/Config.h`](include/Config.h), then build and upload:
 ```bash
-# Build binary
+# Compile firmware
 pio run
 
-# Flash to ESP32 over serial (e.g., COM3)
+# Upload to ESP32-WROVER
 pio run --target upload --upload-port COM3
 
-# Monitor live telemetry (115200 baud)
+# Open Serial Monitor (115200 baud)
 pio device monitor --port COM3
-```
-
-### 3. Live Control Verification
-Once paired, the serial monitor streams real-time status:
-```text
-[PS5] >>> CONTROLLER CONNECTED & READY! <<<
-[LIVE CTRL] L2:  0 R2:  0 | Throt: +0.0% | ESC:1500 us | Steer: 90 deg | State:STANDBY_NEUTRAL
 ```
 
 ---
@@ -321,23 +234,22 @@ Once paired, the serial monitor streams real-time status:
 
 ```text
 Minas/
+├── HILM/
+│   ├── Data/                           # Recorded 20 Hz telemetry CSVs (hidden in Explorer/IDE)
+│   ├── model.py                        # 12-feature ML training, Track A->D evaluation & export
+│   ├── live_detector.py                # Real-time Forza UDP (Port 5000) & Demo Biometric Guard + HUD
+│   ├── minas_live_model.pkl            # Exported model bundle (Tiny NN, Random Forest, Scaler)
+│   └── forza_real_results_graph.png    # Generated benchmark & behavioral dynamics plot
 ├── include/
-│   └── Config.h                  # Hardware GPIO pinouts, timing, and limits
+│   └── Config.h                        # ESP32 GPIO pinouts, PWM limits, and trial constants
 ├── src/
-│   ├── main.cpp                  # 20 Hz control loop, SD logger, safeBeep firmware
-│   └── main_car_full.cpp.bak     # Reference backup
+│   └── main.cpp                        # 20 Hz ESP32 control loop, SDMMC logger, and safeBeep
 ├── docs/
 │   └── images/
-│       ├── system_flow.png       # Complete system architecture and data flow diagram
-│       └── wiring_schematic.png  # Electrical schematics and pin interconnection diagram
-├── data/
-│   ├── raw/                      # Ingest folder for raw 10-minute SD trial CSVs
-│   ├── processed/                # Extracted 49-dim sliding windows & datasets
-│   └── models/                   # Trained Random Forest models & benchmark metrics
-├── tools_train_driver.py         # Window extraction, dataset splitting, and audit tool
-├── train_random_forest.py        # Random Forest model training & security evaluation
-├── platformio.ini                # PlatformIO build settings, ESP32-WROVER env, libraries
-└── README.md                     # Comprehensive project documentation
+│       ├── system_flow.png             # End-to-end system architecture diagram
+│       └── wiring_schematic.png        # ESP32-WROVER electrical wiring schematic
+├── platformio.ini                      # PlatformIO ESP32-WROVER build configuration
+└── README.md                           # Project documentation
 ```
 
 ---
@@ -349,4 +261,4 @@ Minas/
 3. **Warden, P., & Situnayake, D. (2019).** *TinyML: Machine Learning with TensorFlow Lite on Arduino and Ultra-Low-Power Microcontrollers.* O'Reilly Media.
 4. **Martinelli, F., Mercaldo, F., Nardone, V., & Santone, A. (2018).** *Car-Driver Identification Through CAN Bus Data Analysis.* IEEE Transactions on Intelligent Transportation Systems.
 
-Distributed under the **MIT License**. See `LICENSE` for details.
+Distributed under the **MIT License**.

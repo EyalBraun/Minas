@@ -74,14 +74,42 @@
 //         are still computed and recorded to the CSV file for safe offline verification.
 #define ENABLE_MOTOR_OUTPUT true
 
-#define FIRMWARE_VERSION "minas-10min-no-sonar-v3"
+#define FIRMWARE_VERSION "minas-telemetry-v4"
 
 // ----------------------------------------------------------------------------
 // 7. EXPERIMENTAL RECORDING PROTOCOL
 // ----------------------------------------------------------------------------
-// - Circle Button: Start a new 10-minute 'owner' segment.
-// - Square Button: Start a new 10-minute 'nonowner' segment.
-// - Cross Button:  If pressed before 10 minutes, cancels and deletes the incomplete trial.
+// - Circle Button: Start a new 10-minute 'Authorized' (Owner) segment.
+// - Square Button: Start a new 10-minute 'Unauthorized' (Non-owner) segment.
+// - Cross Button:  If pressed before 10 minutes, stops and preserves the trial with '_under10min' tag.
 //                  If pressed after 10 minutes, finalizes and saves the complete trial.
 // - Automatic Stop: Segments automatically finalize and save upon reaching 10 minutes.
 // - Telemetry data collection only occurs during an active, started segment.
+
+// ----------------------------------------------------------------------------
+// 8. OPTIONAL WI-FI NTP CLOCK SYNCHRONIZATION
+// ----------------------------------------------------------------------------
+// If configured with your Wi-Fi SSID or mobile phone hotspot, the ESP32 will connect
+// for 2-3 seconds at boot, sync the real-world date and time from pool.ntp.org, and
+// then shut down Wi-Fi immediately before Bluetooth starts (so there is zero RF conflict).
+// If left empty, the system automatically uses system uptime (boot_HHhMMmSSs) for filenames.
+#define WIFI_NTP_ENABLED        true
+#define WIFI_SSID               ""             // Enter your Wi-Fi / phone hotspot name (or leave empty)
+#define WIFI_PASSWORD           ""             // Enter your Wi-Fi password (or leave empty)
+#define NTP_SERVER              "pool.ntp.org"
+#define NTP_TIMEZONE_OFFSET_SEC 7200           // Israel Standard Time UTC+2 (7200 s)
+#define NTP_DAYLIGHT_OFFSET_SEC 3600           // Daylight Savings offset (3600 s) or 0
+
+// ----------------------------------------------------------------------------
+// 9. DRIVER & TRACK IDENTIFICATION
+// ----------------------------------------------------------------------------
+// Names recorded in the 'driver_name' CSV column:
+#define DRIVER_NAME_AUTHORIZED      "Authorized"   // Circle button (is_authorized = 1)
+#define DRIVER_NAME_UNAUTHORIZED    "Unauthorized" // Square button (is_authorized = 0)
+
+// Default track recorded in the 'track' CSV column ('A', 'B', 'C', or 'D')
+// Can also be changed live on PS5 controller (Up=A, Right=B, Down=C, Left=D, or Triangle to cycle)
+#define DEFAULT_TRACK               'A'
+
+
+
