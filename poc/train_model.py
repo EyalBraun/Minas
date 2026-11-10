@@ -23,7 +23,7 @@ STRIDE_SIZE = int(STRIDE_SECONDS * SAMPLING_RATE_HZ)
 def load_all_forza_data(folder_path="Data"):
     """
     טוען את כל קובצי ה-CSV מתיקיית הנתונים.
-    תומך בהפעלה הן מתוך תיקיית HILM והן מתוך התיקייה הראשית של הפרויקט.
+    תומך בהפעלה הן מתוך תיקיית poc והן מתוך התיקייה הראשית של הפרויקט.
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
@@ -31,7 +31,7 @@ def load_all_forza_data(folder_path="Data"):
         os.path.join(script_dir, folder_path),
         os.path.join(script_dir, "Data"),
         os.path.join(script_dir, "data"),
-        os.path.join(os.getcwd(), "HILM", "Data"),
+        os.path.join(os.getcwd(), "poc", "Data"),
         os.path.join(os.getcwd(), "Data"),
         os.path.join(os.getcwd(), "data"),
     ]
@@ -58,7 +58,7 @@ def load_all_forza_data(folder_path="Data"):
     if not all_files:
         raise ValueError(
             f"No CSV files found in '{folder_path}' or '{os.path.join(script_dir, folder_path)}'.\n"
-            "Please ensure you placed your recorded files in the HILM/Data directory."
+            "Please ensure you placed your recorded files in the poc/Data directory."
         )
 
     print(f"[*] Found {len(all_files)} CSV data files:")
@@ -71,13 +71,11 @@ def load_all_forza_data(folder_path="Data"):
             df = pd.read_csv(file)
             df.columns = [col.strip() for col in df.columns]
 
-            # השלמת נגזרות אם חסרות
+            # השלמת נגזרות אם חסרות (תאימות מלאה ל-Pandas 2.2/3.0 ללא inplace על Series)
             if "d_throttle" not in df.columns and "throttle" in df.columns:
-                df["d_throttle"] = df["throttle"].diff() / (1.0 / SAMPLING_RATE_HZ)
-                df["d_throttle"].fillna(0.0, inplace=True)
+                df["d_throttle"] = (df["throttle"].diff() / (1.0 / SAMPLING_RATE_HZ)).fillna(0.0)
             if "d_steering" not in df.columns and "steering" in df.columns:
-                df["d_steering"] = df["steering"].diff() / (1.0 / SAMPLING_RATE_HZ)
-                df["d_steering"].fillna(0.0, inplace=True)
+                df["d_steering"] = (df["steering"].diff() / (1.0 / SAMPLING_RATE_HZ)).fillna(0.0)
             if "run_number" not in df.columns:
                 df["run_number"] = 1
 
@@ -85,23 +83,30 @@ def load_all_forza_data(folder_path="Data"):
         except Exception as e:
             print(f"[!] Warning: Could not parse {file}: {e}")
 
+    if not df_list:
+        raise ValueError("No valid telemetry CSV files could be parsed.")
+
     full_df = pd.concat(df_list, ignore_index=True)
     return full_df
 
 
-def extract_window_features(df):
+def extract_window_features(df, return_groups=False):
     """
     חותך את הנסיעה לחלונות דינמיים של 2.0 שניות ומחלץ 12 מאפיינים התנהגותיים
     בלתי-תלויים במסלול (Behavioral Biometrics).
+    מסנן חלונות עמידה מוחלטת במקום (IDLE) כדי למנוע זיהום של המודל בדגימות אפס.
     """
     features_list = []
     labels_list = []
+    groups_list = []
 
     group_cols = ["driver_name", "track"]
     if "run_number" in df.columns:
         group_cols.append("run_number")
 
     for keys, group in df.groupby(group_cols):
+        if "timestamp_s" in group.columns:
+            group = group.sort_values("timestamp_s", kind="mergesort")
         vals = group[["throttle", "brake", "steering", "d_throttle", "d_steering"]].values
         label = int(group["is_authorized"].iloc[0])
 
@@ -113,7 +118,16 @@ def extract_window_features(df):
             d_th = win[:, 3]
             d_st = win[:, 4]
 
-            # חילוץ מאפייני חתימה התנהגותית (Biometric Dynamics)
+            # דילוג על חלונות שבהם הרכב עומד לחלוטין ללא שום קלט נהיגה (IDLE)
+            if (
+                np.max(th) < 0.02
+                and np.max(br) < 0.02
+                and np.max(np.abs(st)) < 0.03
+                and np.max(np.abs(d_st)) < 0.05
+            ):
+                continue
+
+            # חילוץ 12 מאפייני חתימה התנהגותית (Biometric Dynamics)
             feat_vec = [
                 np.mean(np.abs(d_st)),                  # 1. קצב ממוצע של תיקוני היגוי (עדינות מול חדות)
                 np.std(d_st),                           # 2. שונות קצב תיקוני היגוי
@@ -130,8 +144,13 @@ def extract_window_features(df):
             ]
             features_list.append(feat_vec)
             labels_list.append(label)
+            groups_list.append(keys)
 
-    return np.array(features_list, dtype=np.float32), np.array(labels_list, dtype=np.int32)
+    X_arr = np.array(features_list, dtype=np.float32)
+    y_arr = np.array(labels_list, dtype=np.int32)
+    if return_groups:
+        return X_arr, y_arr, groups_list
+    return X_arr, y_arr
 
 
 def evaluate_security_metrics(y_true, y_pred):
@@ -176,11 +195,11 @@ def main():
     print(f"[*] Testing on Unseen Track: {test_track}")
 
     train_df = full_df[full_df["track"].isin(train_tracks)]
-    test_df  = full_df[full_df["track"] == test_track]
+    test_df = full_df[full_df["track"] == test_track]
 
     # 2. חילוץ חלונות
     X_train, y_train = extract_window_features(train_df)
-    X_test, y_test   = extract_window_features(test_df)
+    X_test, y_test, test_groups = extract_window_features(test_df, return_groups=True)
 
     print(f"\n[*] Extracted Training Windows: {len(X_train)} (Authorized: {np.sum(y_train==1)}, Unauthorized: {np.sum(y_train==0)})")
     print(f"[*] Extracted Testing Windows:  {len(X_test)} (Authorized: {np.sum(y_test==1)}, Unauthorized: {np.sum(y_test==0)})")
@@ -195,7 +214,7 @@ def main():
     # 3. נרמול מאפיינים (StandardScaler)
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled  = scaler.transform(X_test)
+    X_test_scaled = scaler.transform(X_test)
 
     # 4. איזון דינמי של הנתונים עבור אימון הרשת העצבית
     count_0 = np.sum(y_train == 0)
@@ -273,24 +292,19 @@ def main():
     print("-" * 84)
 
     rolling_results = {}
-    for name, model in models:
+    for name, _ in models:
         y_prob = probs[name]
-        rolling_prob_list = []
-        y_true_list = []
-        idx = 0
-        group_cols = ["driver_name", "track"]
-        if "run_number" in test_df.columns:
-            group_cols.append("run_number")
-        for keys, group in test_df.groupby(group_cols):
-            n_win = (len(group) - WINDOW_SIZE) // STRIDE_SIZE + 1
-            sub_prob = y_prob[idx : idx + n_win]
-            sub_roll = pd.Series(sub_prob).rolling(10, min_periods=1).mean().values
-            rolling_prob_list.extend(sub_roll)
-            y_true_list.extend([int(group["is_authorized"].iloc[0])] * n_win)
-            idx += n_win
+        prob_df = pd.DataFrame({
+            "group": [str(g) for g in test_groups],
+            "prob": y_prob,
+            "y_true": y_test,
+        })
+        prob_df["roll_prob"] = prob_df.groupby("group", sort=False)["prob"].transform(
+            lambda s: s.rolling(10, min_periods=1).mean()
+        )
 
-        y_true_arr = np.array(y_true_list)
-        y_roll_arr = np.array(rolling_prob_list)
+        y_true_arr = prob_df["y_true"].values
+        y_roll_arr = prob_df["roll_prob"].values
 
         best_th, best_score, best_metrics = 0.5, -float("inf"), (0.0, 100.0, 100.0)
         for th in np.arange(0.10, 0.91, 0.01):
@@ -313,7 +327,6 @@ def main():
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
 
     metrics_names = ["Accuracy (%)\n[Target > 90%]", "FAR (%)\n[Target < 5%]", "FRR (%)\n[Target < 10%]"]
-    # שימוש בתוצאות השקלול הרציף (Rolling Consensus) עבור הגרף
     rf_vals = [rolling_results["Random Forest"]["acc"], rolling_results["Random Forest"]["far"], rolling_results["Random Forest"]["frr"]]
     nn_vals = [rolling_results["Tiny Neural Net"]["acc"], rolling_results["Tiny Neural Net"]["far"], rolling_results["Tiny Neural Net"]["frr"]]
 
@@ -368,7 +381,7 @@ def main():
 
     plt.tight_layout()
 
-    # שמירת הגרף בתיקיית HILM בלבד (לשמירה על סדר בתיקייה הראשית)
+    # שמירת הגרף בתיקיית poc בלבד (לשמירה על סדר בתיקייה הראשית)
     script_dir = os.path.dirname(os.path.abspath(__file__))
     graph_path = os.path.join(script_dir, "forza_real_results_graph.png")
     try:
@@ -376,6 +389,8 @@ def main():
         print(f"[v] Graph saved successfully as '{graph_path}'")
     except Exception as e:
         print(f"[!] Could not save graph to '{graph_path}': {e}")
+    finally:
+        plt.close(fig)
 
     # 8. ייצוא המודל, המנרמל (Scaler) והסף המכויל עבור מערכת הזיהוי בזמן אמת (Live PoC)
     model_bundle = {

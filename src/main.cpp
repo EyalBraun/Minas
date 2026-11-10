@@ -352,28 +352,6 @@ bool openTrial(bool owner) {
 }
 
 /**
- * @brief Encodes physical PS5 buttons into an unsigned 16-bit bitmask.
- *
- * @return 16-bit integer where each bit corresponds to an individual button state.
- */
-uint16_t buttonsMask() {
-    uint16_t mask = 0;
-    if (ps5.Cross())    mask |= (1u << 0);
-    if (ps5.Circle())   mask |= (1u << 1);
-    if (ps5.Square())   mask |= (1u << 2);
-    if (ps5.Triangle()) mask |= (1u << 3);
-    if (ps5.L1())       mask |= (1u << 4);
-    if (ps5.R1())       mask |= (1u << 5);
-    if (ps5.L3())       mask |= (1u << 6);
-    if (ps5.R3())       mask |= (1u << 7);
-    if (ps5.Up())       mask |= (1u << 8);
-    if (ps5.Down())     mask |= (1u << 9);
-    if (ps5.Left())     mask |= (1u << 10);
-    if (ps5.Right())    mask |= (1u << 11);
-    return mask;
-}
-
-/**
  * @brief Writes a single telemetry sample row to the open trial CSV file.
  *
  * Formats all 10 columns exactly matching Forza data logging:
@@ -682,8 +660,9 @@ void loop() {
     static uint32_t lastStatusPrintMs = 0;
     if (trialActive && (now - lastStatusPrintMs >= 2000UL)) {
         lastStatusPrintMs = now;
-        uint32_t elapsedSec = (now - trialStartMs) / 1000UL;
-        uint32_t remainingSec = (TRIAL_DURATION_MS - (now - trialStartMs)) / 1000UL;
+        const uint32_t elapsedMs = now - trialStartMs;
+        const uint32_t elapsedSec = elapsedMs / 1000UL;
+        const uint32_t remainingSec = (elapsedMs < TRIAL_DURATION_MS) ? ((TRIAL_DURATION_MS - elapsedMs) / 1000UL) : 0UL;
         Serial.printf("[TRIAL PROGRESS] %s | Track: %c | Elapsed: %lu s (%lu min) | Remaining: %lu s | Samples: %lu\n",
                       ownerLabel ? DRIVER_NAME_AUTHORIZED : DRIVER_NAME_UNAUTHORIZED,
                       currentTrack,

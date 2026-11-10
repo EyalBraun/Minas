@@ -25,7 +25,7 @@ except ImportError:
             return ""
     Fore = Back = Style = _Dummy()
 
-# קבועי דגימה וחלון זמן (זהים ל-model.py ול-ESP32)
+# קבועי דגימה וחלון זמן (זהים ל-train_biometric_model.py ול-ESP32)
 SAMPLING_RATE_HZ = 20
 DT = 1.0 / SAMPLING_RATE_HZ          # 0.05s (50ms)
 WINDOW_SECONDS = 2.0
@@ -38,7 +38,7 @@ ALARM_CONSECUTIVE_WINDOWS = 8                          # 8 חלונות סמוכ
 def extract_single_window_features(win_array: np.ndarray) -> np.ndarray:
     """
     מקבל מטריצה בגודל (40, 5) של [throttle, brake, steering, d_throttle, d_steering]
-    ומחלץ את 12 המאפיינים ההתנהגותיים הביומטריים (בדיוק כמו ב-model.py).
+    ומחלץ את 12 המאפיינים ההתנהגותיים הביומטריים (בדיוק כמו ב-train_biometric_model.py).
     """
     th = win_array[:, 0]
     br = win_array[:, 1]
@@ -66,22 +66,24 @@ def extract_single_window_features(win_array: np.ndarray) -> np.ndarray:
 def load_or_train_model():
     """
     טוען את המודל המאומן וה-Scaler מתוך minas_live_model.pkl.
-    אם הקובץ עדיין לא קיים, מריץ אוטומטית את model.py כדי לייצר אותו.
+    אם הקובץ עדיין לא קיים, מריץ אוטומטית את train_biometric_model.py כדי לייצר אותו.
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
         os.path.join(script_dir, "minas_live_model.pkl"),
+        os.path.join("poc", "minas_live_model.pkl"),
         "minas_live_model.pkl",
-        os.path.join("HILM", "minas_live_model.pkl"),
     ]
     for path in candidates:
         if os.path.isfile(path):
             print(f"[*] Loading trained model bundle from: {path}")
             return joblib.load(path)
 
-    print("[!] Model bundle 'minas_live_model.pkl' not found. Training now via model.py...")
-    import model as minas_model
-    minas_model.main()
+    print("[!] Model bundle 'minas_live_model.pkl' not found. Training now via train_model.py...")
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    import train_model
+    train_model.main()
 
     for path in candidates:
         if os.path.isfile(path):
@@ -92,54 +94,47 @@ def load_or_train_model():
 
 def parse_forza_udp_packet(data: bytes):
     """
-    מפענח חבילת UDP של Forza Data Out.
-    ב-Forza Horizon 4/5/6 חבילת Dash מכילה 324 בייטים וכוללת 12 בייטים של ריווח (Padding gap)
-    המעבירים את הקלטים למיקומים המדויקים:
-      - מהירות (Speed m/s):     בייט 256 (F32)
-      - מצערת (Throttle/Accel): בייט 315 (U8: 0..255)
-      - בלימה (Brake):          בייט 316 (U8: 0..255)
-      - היגוי (Steering):        בייט 320 (S8: -127..127)
-    ב-Forza Motorsport 7/8 (ללא ריווח 12 הבייטים):
-      - מהירות (Speed m/s):     בייט 244 (F32)
-      - מצערת (Throttle/Accel): בייט 303 (U8)
-      - בלימה (Brake):          בייט 304 (U8)
-      - היגוי (Steering):        בייט 308 (S8)
+    מפענח חבילת UDP של Forza Data Out לפי גודל החבילה המדויק:
+    1. ב-Forza Horizon 4/5 (חבילת Dash של 324 בייטים, הכוללת 12 בייטים של Horizon Car Info):
+       - מהירות (Speed m/s):     בייט 256 (F32)
+       - מצערת (Throttle/Accel): בייט 315 (U8: 0..255)
+       - בלימה (Brake):          בייט 316 (U8: 0..255)
+       - היגוי (Steering):        בייט 320 (S8: -127..127)
+    2. ב-Forza Motorsport 7 / FM (חבילת Dash של 311 בייטים):
+       - מהירות (Speed m/s):     בייט 244 (F32)
+       - מצערת (Throttle/Accel): בייט 303 (U8)
+       - בלימה (Brake):          בייט 304 (U8)
+       - היגוי (Steering):        בייט 308 (S8)
     """
     n = len(data)
-    if n < 232:
+    if n < 311:
         return False, 0.0, 0.0, 0.0, 0.0
 
     is_race_on = struct.unpack_from("<i", data, 0)[0] == 1
 
-    if n >= 323:
-        # Forza Horizon (324 Bytes)
+    if n >= 324:
+        # Forza Horizon (324 Bytes) - התאמה של 100% לבייטים של forza_telemetry_logger.py
         raw_accel = data[315]
         raw_brake = data[316]
         raw_steer = struct.unpack_from("<b", data, 320)[0]
         speed_mps = abs(struct.unpack_from("<f", data, 256)[0])
-
-        # גיבוי למקרה של Motorsport layout (אם בייטים 315/316 ריקים אך 303/304 פעילים)
-        if raw_accel == 0 and raw_brake == 0 and (data[303] > 0 or data[304] > 0):
-            raw_accel = data[303]
-            raw_brake = data[304]
-            raw_steer = struct.unpack_from("<b", data, 308)[0]
-            speed_mps = abs(struct.unpack_from("<f", data, 244)[0])
-
-    elif n >= 311:
-        # Forza Motorsport 7 Dash (311 Bytes)
-        raw_accel = data[303] if n > 304 else data[291]
-        raw_brake = data[304] if n > 304 else data[292]
-        raw_steer = struct.unpack_from("<b", data, 308 if n > 308 else 296)[0]
-        speed_mps = abs(struct.unpack_from("<f", data, 244)[0])
     else:
-        raw_accel = 0
-        raw_brake = 0
-        raw_steer = 0
+        # Forza Motorsport Dash (311 Bytes)
+        raw_accel = data[303]
+        raw_brake = data[304]
+        raw_steer = struct.unpack_from("<b", data, 308)[0]
+        speed_mps = abs(struct.unpack_from("<f", data, 244)[0])
+
+    if not np.isfinite(speed_mps):
         speed_mps = 0.0
 
     throttle = round(float(np.clip(raw_accel / 255.0, 0.0, 1.0)), 4)
     brake = round(float(np.clip(raw_brake / 255.0, 0.0, 1.0)), 4)
     steering = round(float(np.clip(raw_steer / 127.0, -1.0, 1.0)), 4)
+
+    # כאשר המשחק בתפריט עצירה (Pause) ואין קלט דוושות/הגה, מאפסים מהירות כדי לעבור ל-IDLE מיד
+    if not is_race_on and throttle == 0.0 and brake == 0.0 and steering == 0.0:
+        speed_mps = 0.0
 
     return is_race_on, throttle, brake, steering, float(speed_mps)
 
@@ -165,7 +160,7 @@ def trigger_alarm_beep(async_beep=True):
 
 class LiveHUDWindow:
     """
-    חלון צף (Always-On-Top Overlay) להקלטת וידאו למצגת מעל מסך המשחק של Forza.
+    חלון צף (Always-On-Top Overlay) להצגה מעל מסך המשחק של Forza.
     מציג אך ורק האם הנהג מורשה (ירוק), עומד במקום (IDLE), או לא מורשה (אדום מהבהב),
     והאם הזמזם (Buzzer) פועל או כבוי.
     """
@@ -179,14 +174,15 @@ class LiveHUDWindow:
             self.root.title("Minas Live Biometric Guard (PoC)")
             self.root.geometry("440x175+30+30")
             self.root.attributes("-topmost", True)
-            self.root.configure(bg="#1b4332")
+            self.root.configure(bg="#2b2d42")
+            self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
             self.title_lbl = tk.Label(
                 self.root,
                 text="MINAS LIVE BIOMETRIC GUARD  [IDLE]",
                 font=("Segoe UI", 11, "bold"),
                 fg="#d8f3dc",
-                bg="#1b4332",
+                bg="#2b2d42",
             )
             self.title_lbl.pack(pady=(14, 6))
 
@@ -195,7 +191,7 @@ class LiveHUDWindow:
                 text="⏸ IDLE",
                 font=("Segoe UI", 24, "bold"),
                 fg="white",
-                bg="#1b4332",
+                bg="#2b2d42",
             )
             self.status_lbl.pack(pady=6)
 
@@ -203,8 +199,8 @@ class LiveHUDWindow:
                 self.root,
                 text="🔇 BUZZER: OFF",
                 font=("Segoe UI", 15, "bold"),
-                fg="#b7e4c7",
-                bg="#1b4332",
+                fg="#adb5bd",
+                bg="#2b2d42",
             )
             self.buzzer_lbl.pack(pady=6)
 
@@ -213,7 +209,14 @@ class LiveHUDWindow:
             print(f"[!] GUI Overlay disabled ({e}). Running in Terminal HUD mode.")
             self.enabled = False
 
-    def update_view(self, state, prob=0.5, unauth_counter=0, th=0.0, br=0.0, st=0.0, d_st=0.0, sim_tag=""):
+    def _on_close(self):
+        self.enabled = False
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    def update_view(self, state):
         if not self.enabled:
             return
         try:
@@ -290,9 +293,16 @@ class MinasLiveEngine:
         self.prev_st = steering
 
         # בדיקה מידית אם הרכב עומד במקום במשחק (מהירות כמעט 0 וללא גז/היגוי)
-        car_stopped_in_game = (speed_mps is not None) and (speed_mps < 0.8) and (throttle < 0.02) and (abs(steering) < 0.03)
+        car_stopped_in_game = (
+            (speed_mps is not None)
+            and (speed_mps < 0.8)
+            and (throttle < 0.02)
+            and (abs(steering) < 0.03)
+        )
         if car_stopped_in_game:
             self.unauth_counter = 0
+            self.prob_history.clear()
+            self.has_prev = False
             if self.hud:
                 self.hud.update_view("IDLE")
             self.samples_since_eval += 1
@@ -324,6 +334,8 @@ class MinasLiveEngine:
             )
             if is_idle_controls:
                 self.unauth_counter = 0
+                self.prob_history.clear()
+                self.has_prev = False
                 state = "IDLE"
                 self.print_terminal_status(state)
                 if self.hud:
@@ -367,7 +379,7 @@ class MinasLiveEngine:
 
         return None
 
-    def print_terminal_status(self, state, prob=0.5, th=0.0, br=0.0, st=0.0, d_st=0.0, sim_tag=""):
+    def print_terminal_status(self, state):
         if state == "IDLE":
             color = Fore.CYAN + Style.BRIGHT
             print(f"{color} ⏸ IDLE          |  🔇 BUZZER: OFF {Style.RESET_ALL}")
@@ -382,7 +394,7 @@ class MinasLiveEngine:
 def run_live_forza_udp(engine: MinasLiveEngine, ip: str, port: int):
     """
     מאזין בזמן אמת לחבילות UDP מ-Forza Data Out (פורט ברירת מחדל: 5000)
-    ודוגם בקצב מדויק של 20Hz לתוך המנוע הביומטרי.
+    ודוגם בקצב מדויק של 20Hz לתוך המנוע הביומטרי תוך ריקון הבאפר למניעת השהיות.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((ip, port))
@@ -394,7 +406,7 @@ def run_live_forza_udp(engine: MinasLiveEngine, ip: str, port: int):
     print("=" * 92)
 
     last_sample_time = 0.0
-    packet_count = 0
+    connected_announced = False
     try:
         while True:
             try:
@@ -404,15 +416,26 @@ def run_live_forza_udp(engine: MinasLiveEngine, ip: str, port: int):
                     engine.hud.update_view("IDLE")
                 continue
 
-            packet_count += 1
-            if packet_count == 1:
-                print(f"{Fore.GREEN}[*] CONNECTED! Receiving Forza UDP telemetry packets (size: {len(data)} bytes).{Style.RESET_ALL}")
+            # ריקון כל החבילות שהצטברו בבאפר של מערכת ההפעלה כדי לקרוא תמיד את החבילה העדכנית ביותר בזמן אמת
+            latest_data = data
+            sock.setblocking(False)
+            while True:
+                try:
+                    pkt, _ = sock.recvfrom(1024)
+                    latest_data = pkt
+                except (BlockingIOError, socket.error):
+                    break
+            sock.settimeout(0.5)
+
+            if not connected_announced:
+                connected_announced = True
+                print(f"{Fore.GREEN}[*] CONNECTED! Receiving Forza UDP telemetry packets (size: {len(latest_data)} bytes).{Style.RESET_ALL}")
 
             now = time.perf_counter()
             if now - last_sample_time < DT:
                 continue
 
-            is_race_on, th, br, st, speed_mps = parse_forza_udp_packet(data)
+            _, th, br, st, speed_mps = parse_forza_udp_packet(latest_data)
 
             last_sample_time = now
             engine.push_sample(th, br, st, sim_tag="LIVE FORZA", speed_mps=speed_mps)
@@ -426,8 +449,8 @@ def run_live_forza_udp(engine: MinasLiveEngine, ip: str, port: int):
 def run_handover_demo(engine: MinasLiveEngine, duration_auth_sec=12.0, duration_unauth_sec=12.0, speed_multiplier=1.0):
     """
     מצב הדגמה חיה (PoC Video Demo):
-    מזרים בזמן אמת (20Hz) את הנהיגה האמיתית של אייל במסלול D (הכל ירוק: Eyal - Authorized),
-    ואז מדמה העברת שלט לשירה תוך כדי נסיעה — ותוך 3 שניות (6 חלונות) מפעיל אזעקה אדומה וצפצוף!
+    מזרים בזמן אמת (20Hz) את הנהיגה במסלול D (שלב 1: נהג מורשה - ירוק),
+    ואז מדמה העברת שליטה לנהג לא-מורשה תוך כדי נסיעה — ותוך 4.0 שניות (8 חלונות סמוכים) מפעיל התרעה וזמזם!
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(script_dir, "Data")
@@ -440,7 +463,7 @@ def run_handover_demo(engine: MinasLiveEngine, duration_auth_sec=12.0, duration_
     df_auth = pd.read_csv(auth_file)
     df_unauth = pd.read_csv(unauth_file)
 
-    # בחירת מקטע נהיגה פעיל של אייל ושל שירה ממסלול המבחן D
+    # בחירת מקטע נהיגה פעיל של הנהג המורשה ושל הנהג הלא-מורשה ממסלול המבחן D
     n_auth = int(duration_auth_sec * SAMPLING_RATE_HZ)
     best_start_a = 160
     highest_prob = 0.0
@@ -455,7 +478,6 @@ def run_handover_demo(engine: MinasLiveEngine, duration_auth_sec=12.0, duration_
             best_start_a = cand_idx
     slice_auth = df_auth.iloc[best_start_a : best_start_a + n_auth]
 
-    # חיפוש מקטע פעיל של שירה שבו סגנון ההיגוי שלה מובהק
     n_unauth = int(duration_unauth_sec * SAMPLING_RATE_HZ)
     best_start_u = 400
     lowest_prob = 1.0
@@ -473,8 +495,8 @@ def run_handover_demo(engine: MinasLiveEngine, duration_auth_sec=12.0, duration_
 
     print("=" * 92)
     print("=== Minas Live PoC Simulation: Continuous Biometric Driver Authentication ===")
-    print(f"=== Phase 1 ({duration_auth_sec:.0f}s): Authorized Driver -> Expect GREEN (Authorized)              ===")
-    print(f"=== Phase 2 ({duration_unauth_sec:.0f}s): Unauthorized Driver -> Expect RED (Unauthorized in 3.0s!) ===")
+    print(f"=== Phase 1 ({duration_auth_sec:.0f}s): Authorized Driver   -> Expect GREEN (Authorized)              ===")
+    print(f"=== Phase 2 ({duration_unauth_sec:.0f}s): Unauthorized Driver -> Expect RED   (Unauthorized in 4.0s!) ===")
     print("=" * 92)
 
     sleep_dt = DT / max(speed_multiplier, 0.1)
@@ -493,7 +515,7 @@ def run_handover_demo(engine: MinasLiveEngine, duration_auth_sec=12.0, duration_
             time.sleep(sleep_dt)
 
         print(f"\n{Back.MAGENTA}{Fore.WHITE}{Style.BRIGHT}>>> [DRIVER SWITCH] Unauthorized driver takes control of the vehicle! <<<{Style.RESET_ALL}\n")
-        # איפוס היסטוריית ההחלקה במעבר החד כדי להדגים תגובה בזמן אמת של 6 חלונות (3 שניות)
+        # איפוס היסטוריית ההחלקה במעבר החד כדי להדגים תגובה בזמן אמת של 8 חלונות סמוכים (4.0 שניות)
         engine.prob_history.clear()
 
         for _, row in slice_unauth.iterrows():
