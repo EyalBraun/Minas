@@ -107,8 +107,8 @@
 #define DRIVER_NAME_AUTHORIZED      "Authorized"   // Circle button (is_authorized = 1)
 #define DRIVER_NAME_UNAUTHORIZED    "Unauthorized" // Square button (is_authorized = 0)
 
-// Default track recorded in the 'track' CSV column ('A', 'B', 'C', or 'D')
-// Can also be changed live on PS5 controller (Up=A, Right=B, Down=C, Left=D, or Triangle to cycle)
+// Default track recorded in the 'track' CSV column ('A', 'B', or 'D')
+// Can also be changed live on PS5 controller (Up=A, Right=B, Down/Left=D, or Triangle to cycle)
 #define DEFAULT_TRACK               'A'
 
 

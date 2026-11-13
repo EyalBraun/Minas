@@ -38,7 +38,7 @@ ALARM_CONSECUTIVE_WINDOWS = 8                          # 8 חלונות סמוכ
 def extract_single_window_features(win_array: np.ndarray) -> np.ndarray:
     """
     מקבל מטריצה בגודל (40, 5) של [throttle, brake, steering, d_throttle, d_steering]
-    ומחלץ את 12 המאפיינים ההתנהגותיים הביומטריים (בדיוק כמו ב-train_biometric_model.py).
+    ומחלץ את 16 המאפיינים ההתנהגותיים הביומטריים (בדיוק כמו ב-train_model.py).
     """
     th = win_array[:, 0]
     br = win_array[:, 1]
@@ -47,18 +47,22 @@ def extract_single_window_features(win_array: np.ndarray) -> np.ndarray:
     d_st = win_array[:, 4]
 
     feat_vec = [
-        np.mean(np.abs(d_st)),                  # 1. קצב ממוצע של תיקוני היגוי
-        np.std(d_st),                           # 2. שונות קצב תיקוני היגוי
-        np.max(np.abs(d_st)),                   # 3. שיא חדות תיקון ההיגוי בחלון
-        np.sum((d_st[:-1] * d_st[1:]) < 0),     # 4. תדירות היפוכי כיוון בהיגוי
-        np.mean(np.abs(st)),                    # 5. משרעת ממוצעת של זווית ההיגוי
-        np.std(st),                             # 6. שונות שימוש בהיגוי
-        np.mean(th),                            # 7. מצערת ממוצעת
-        np.std(th),                             # 8. תנודתיות המצערת
-        np.mean(np.abs(d_th)),                  # 9. קצב ממוצע של לחיצות/שחרורי גז
-        np.std(d_th),                           # 10. שונות קצב שינוי הגז
-        np.mean(br),                            # 11. יחס שימוש בבלמים
-        np.std(br),                             # 12. שונות בלימה
+        np.mean(np.abs(d_st)),                              # 1. קצב ממוצע של תיקוני היגוי
+        np.std(d_st),                                       # 2. שונות קצב תיקוני היגוי
+        np.max(np.abs(d_st)),                               # 3. שיא חדות תיקון ההיגוי בחלון
+        np.sum((d_st[:-1] * d_st[1:]) < 0),                 # 4. תדירות היפוכי כיוון בהיגוי
+        np.mean(np.abs(st)),                                # 5. משרעת ממוצעת של זווית ההיגוי
+        np.std(st),                                         # 6. שונות שימוש בהיגוי
+        np.mean(th),                                        # 7. מצערת ממוצעת
+        np.std(th),                                         # 8. תנודתיות המצערת
+        np.mean(np.abs(d_th)),                              # 9. קצב ממוצע של לחיצות/שחרורי גז
+        np.std(d_th),                                       # 10. שונות קצב שינוי הגז
+        np.mean(br),                                        # 11. יחס שימוש בבלמים
+        np.std(br),                                         # 12. שונות בלימה
+        float(np.mean(th > 0.85)),                          # 13. שיעור לחיצה על מצערת מלאה
+        float(np.mean((th < 0.05) & (br < 0.05))),          # 14. שיעור גלישה ללא דוושות
+        float(np.mean(br > 0.10)),                          # 15. תדירות בלימה מובהקת
+        float(np.percentile(np.abs(d_st), 90)),             # 16. אחוזון 90 של חדות תיקוני היגוי
     ]
     return np.array([feat_vec], dtype=np.float32)
 
@@ -255,14 +259,19 @@ class MinasLiveEngine:
     """
     מנוע הזיהוי בזמן אמת (Circular Buffer של 40 דגימות + מונה התרעות רציף של 8 חלונות סמוכים).
     """
-    def __init__(self, bundle, use_gui=True, custom_threshold=None):
-        self.nn_model = bundle["nn_model"]
-        self.rf_model = bundle["rf_model"]
+    def __init__(self, bundle, use_gui=True, custom_threshold=None, model_type="nn"):
+        self.model_type = model_type.lower()
+        self.nn_model = bundle.get("nn_model")
+        self.rf_model = bundle.get("rf_model")
+        self.active_model = self.nn_model if self.model_type == "nn" else self.rf_model
         self.scaler = bundle["scaler"]
         self.auth_driver = bundle.get("authorized_driver", "Eyal")
 
-        # סף החלטה מכויל (ברירת מחדל מהמודל, או סף מותאם אישית)
-        default_th = max(float(bundle.get("threshold_nn", 0.35)), 0.35)
+        # סף החלטה מכויל עבור המודל הנבחר
+        if self.model_type == "nn":
+            default_th = float(bundle.get("threshold_nn", 0.45))
+        else:
+            default_th = float(bundle.get("threshold_rf", 0.46))
         self.threshold = custom_threshold if custom_threshold is not None else default_th
 
         self.buffer = deque(maxlen=WINDOW_SIZE)
@@ -345,12 +354,9 @@ class MinasLiveEngine:
             feats = extract_single_window_features(win_arr)
             feats_scaled = self.scaler.transform(feats)
 
-            # שקלול הסתברות של הרשת העצבית (Tiny Neural Net) ו-Random Forest ליציבות מקסימלית
-            nn_idx = list(self.nn_model.classes_).index(1)
-            rf_idx = list(self.rf_model.classes_).index(1)
-            p_nn = float(self.nn_model.predict_proba(feats_scaled)[0, nn_idx])
-            p_rf = float(self.rf_model.predict_proba(feats_scaled)[0, rf_idx])
-            raw_prob = 0.55 * p_nn + 0.45 * p_rf
+            # חישוב הסתברות ישירה מהמודל הנבחר (Tiny Neural Net כברירת מחדל או Random Forest)
+            class_idx = list(self.active_model.classes_).index(1)
+            raw_prob = float(self.active_model.predict_proba(feats_scaled)[0, class_idx])
 
             self.prob_history.append(raw_prob)
             smooth_prob = float(np.mean(self.prob_history))
@@ -454,11 +460,34 @@ def run_handover_demo(engine: MinasLiveEngine, duration_auth_sec=12.0, duration_
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(script_dir, "Data")
-    auth_file = os.path.join(data_dir, "minas_Eyal_TrackD_Run1.csv")
-    unauth_file = os.path.join(data_dir, "minas_Shira_TrackD_Run2.csv")
 
-    if not os.path.isfile(auth_file) or not os.path.isfile(unauth_file):
-        raise FileNotFoundError(f"Demo requires '{auth_file}' and '{unauth_file}'.")
+    # חיפוש אוטומטי של קובץ מורשה וקובץ לא-מורשה במסלול D
+    auth_candidates = [
+        os.path.join(data_dir, "minas_Eyal_TrackD_Run1.csv"),
+    ]
+    unauth_candidates = [
+        os.path.join(data_dir, "minas_Daniel_TrackD_Run3.csv"),
+        os.path.join(data_dir, "minas_Rom_TrackD_Run4.csv"),
+        os.path.join(data_dir, "minas_Shira_TrackD_Run2.csv"),
+    ]
+    auth_file = next((f for f in auth_candidates if os.path.isfile(f)), None)
+    unauth_file = next((f for f in unauth_candidates if os.path.isfile(f)), None)
+
+    if not auth_file or not unauth_file:
+        import glob
+        all_d = glob.glob(os.path.join(data_dir, "*TrackD*.csv"))
+        for f in all_d:
+            try:
+                c_df = pd.read_csv(f, nrows=5)
+                if c_df["is_authorized"].iloc[0] == 1 and not auth_file:
+                    auth_file = f
+                elif c_df["is_authorized"].iloc[0] == 0 and not unauth_file:
+                    unauth_file = f
+            except Exception:
+                pass
+
+    if not auth_file or not unauth_file:
+        raise FileNotFoundError(f"Demo requires an Authorized and Unauthorized Track D file in '{data_dir}'.")
 
     df_auth = pd.read_csv(auth_file)
     df_unauth = pd.read_csv(unauth_file)
@@ -467,12 +496,11 @@ def run_handover_demo(engine: MinasLiveEngine, duration_auth_sec=12.0, duration_
     n_auth = int(duration_auth_sec * SAMPLING_RATE_HZ)
     best_start_a = 160
     highest_prob = 0.0
+    class_idx = list(engine.active_model.classes_).index(1)
     for cand_idx in range(120, min(len(df_auth) - n_auth, 2000), 40):
         win = df_auth.iloc[cand_idx : cand_idx + WINDOW_SIZE][["throttle", "brake", "steering", "d_throttle", "d_steering"]].values
         feats = engine.scaler.transform(extract_single_window_features(win))
-        p_nn = engine.nn_model.predict_proba(feats)[0, list(engine.nn_model.classes_).index(1)]
-        p_rf = engine.rf_model.predict_proba(feats)[0, list(engine.rf_model.classes_).index(1)]
-        p = 0.55 * p_nn + 0.45 * p_rf
+        p = float(engine.active_model.predict_proba(feats)[0, class_idx])
         if p > highest_prob:
             highest_prob = p
             best_start_a = cand_idx
@@ -484,9 +512,7 @@ def run_handover_demo(engine: MinasLiveEngine, duration_auth_sec=12.0, duration_
     for cand_idx in range(100, len(df_unauth) - n_unauth, 80):
         win = df_unauth.iloc[cand_idx : cand_idx + WINDOW_SIZE][["throttle", "brake", "steering", "d_throttle", "d_steering"]].values
         feats = engine.scaler.transform(extract_single_window_features(win))
-        p_nn = engine.nn_model.predict_proba(feats)[0, list(engine.nn_model.classes_).index(1)]
-        p_rf = engine.rf_model.predict_proba(feats)[0, list(engine.rf_model.classes_).index(1)]
-        p = 0.55 * p_nn + 0.45 * p_rf
+        p = float(engine.active_model.predict_proba(feats)[0, class_idx])
         if p < lowest_prob:
             lowest_prob = p
             best_start_u = cand_idx
@@ -543,12 +569,13 @@ def main():
     parser.add_argument("--ip", default="127.0.0.1", help="UDP bind IP for Forza Data Out (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=5000, help="UDP port for Forza Data Out (default: 5000)")
     parser.add_argument("--threshold", type=float, default=None, help="Override decision threshold (e.g. 0.45)")
+    parser.add_argument("--model", choices=["nn", "rf"], default="nn", help="Biometric model to run: 'nn' (Tiny Neural Net, default) or 'rf' (Random Forest)")
     parser.add_argument("--no-gui", action="store_true", help="Disable floating Tkinter HUD window")
     parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier for demo mode (default: 1.0 = real-time)")
     args = parser.parse_args()
 
     bundle = load_or_train_model()
-    engine = MinasLiveEngine(bundle, use_gui=not args.no_gui, custom_threshold=args.threshold)
+    engine = MinasLiveEngine(bundle, use_gui=not args.no_gui, custom_threshold=args.threshold, model_type=args.model)
 
     mode = args.mode
     if mode is None:

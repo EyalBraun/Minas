@@ -47,7 +47,7 @@ float previousNormSteering = 0.0f;              // Prior normalized steering (-1
 float previousNormThrottle = 0.0f;              // Prior normalized throttle (0.0 to 1.0)
 uint32_t previousSampleMs = 0;                 // Timestamp (millis) of prior sample for exact dt derivation
 
-char currentTrack = DEFAULT_TRACK;              // Active driving track: 'A', 'B', 'C', or 'D'
+char currentTrack = DEFAULT_TRACK;              // Active driving track: 'A', 'B', or 'D'
 
 bool previousCircle = false;      // Previous state of PS5 Circle button (for edge detection)
 bool previousSquare = false;      // Previous state of PS5 Square button (for edge detection)
@@ -55,7 +55,7 @@ bool previousCross = false;       // Previous state of PS5 Cross button (for edg
 bool previousTriangle = false;    // Previous state of PS5 Triangle button (cycle track)
 bool previousUp = false;          // Previous state of PS5 D-Pad Up (Track A)
 bool previousRight = false;       // Previous state of PS5 D-Pad Right (Track B)
-bool previousDown = false;        // Previous state of PS5 D-Pad Down (Track C)
+bool previousDown = false;        // Previous state of PS5 D-Pad Down (Track D)
 bool previousLeft = false;        // Previous state of PS5 D-Pad Left (Track D)
 
 /**
@@ -76,10 +76,10 @@ void safeBeep(uint32_t freqHz, uint32_t durationMs) {
 }
 
 /**
- * @brief Audio confirmation of the selected track (1 beep=A, 2=B, 3=C, 4=D).
+ * @brief Audio confirmation of the selected track (1 beep=A, 2=B, 3=D).
  */
 void beepTrack(char track) {
-    int count = (track == 'A') ? 1 : (track == 'B') ? 2 : (track == 'C') ? 3 : 4;
+    int count = (track == 'A') ? 1 : (track == 'B') ? 2 : 3;
     for (int i = 0; i < count; i++) {
         safeBeep(2400, 60);
         if (i < count - 1) delay(70);
@@ -421,14 +421,14 @@ void sampleController() {
         if (circle && !previousCircle) openTrial(true);         // Circle = Owner trial
         else if (square && !previousSquare) openTrial(false);    // Square = Non-owner trial
         else if (triangle && !previousTriangle) {
-            // Cycle track: A -> B -> C -> D -> A
-            currentTrack = (currentTrack == 'A') ? 'B' : (currentTrack == 'B') ? 'C' : (currentTrack == 'C') ? 'D' : 'A';
+            // Cycle track: A -> B -> D -> A
+            currentTrack = (currentTrack == 'A') ? 'B' : (currentTrack == 'B') ? 'D' : 'A';
             Serial.printf("[TRACK] Switched to Track %c\n", currentTrack);
             beepTrack(currentTrack);
         }
         else if (dpadUp && !previousUp) {
             currentTrack = 'A';
-            Serial.println("[TRACK] Selected Track A (Open Parking)");
+            Serial.println("[TRACK] Selected Track A (Open Course)");
             beepTrack('A');
         }
         else if (dpadRight && !previousRight) {
@@ -436,12 +436,7 @@ void sampleController() {
             Serial.println("[TRACK] Selected Track B (Slalom S-Curves)");
             beepTrack('B');
         }
-        else if (dpadDown && !previousDown) {
-            currentTrack = 'C';
-            Serial.println("[TRACK] Selected Track C (Obstacle Course)");
-            beepTrack('C');
-        }
-        else if (dpadLeft && !previousLeft) {
+        else if ((dpadDown && !previousDown) || (dpadLeft && !previousLeft)) {
             currentTrack = 'D';
             Serial.println("[TRACK] Selected Track D (Held-Out Test)");
             beepTrack('D');
@@ -630,7 +625,7 @@ void setup() {
     Serial.println("[READY] Protocol:");
     Serial.printf("  - Circle Button:    Start 10-minute AUTHORIZED segment ('%s', is_authorized=1)\n", DRIVER_NAME_AUTHORIZED);
     Serial.printf("  - Square Button:    Start 10-minute UNAUTHORIZED segment ('%s', is_authorized=0)\n", DRIVER_NAME_UNAUTHORIZED);
-    Serial.printf("  - D-Pad / Triangle: Select Track A/B/C/D (Active: Track %c)\n", currentTrack);
+    Serial.printf("  - D-Pad / Triangle: Select Track A/B/D (Active: Track %c)\n", currentTrack);
     Serial.println("  - Cross Button:     Stop & Preserve (< 10 min) or Finish (>= 10 min)");
     Serial.println("  - Auto-stop:        Automatically saves at exactly 10 minutes");
     Serial.printf("[READY] Motor Output: %s\n", ENABLE_MOTOR_OUTPUT ? "ENABLED (Live)" : "BENCH (Neutral)");

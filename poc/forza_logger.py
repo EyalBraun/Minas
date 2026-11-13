@@ -18,7 +18,7 @@ def record_telemetry():
     # איסוף מטא-דאטה לפני תחילת הנסיעה
     driver_name = input("1. Enter Driver Name (e.g., Eyal, Guest1): ").strip()
     is_auth = input(f"2. Is {driver_name} the Authorized driver? (1 = Yes, 0 = No): ").strip()
-    track_name = input("3. Enter Track (A, B, C, or D): ").strip().upper()
+    track_name = input("3. Enter Track (A, B, or D): ").strip().upper()
     run_num = input("4. Enter Run Number (e.g., 1, 2, 3): ").strip()
     
     # פתיחת שקע UDP
