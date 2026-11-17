@@ -25,7 +25,7 @@ except ImportError:
             return ""
     Fore = Back = Style = _Dummy()
 
-# קבועי דגימה וחלון זמן (זהים ל-train_biometric_model.py ול-ESP32)
+# קבועי דגימה וחלון זמן (זהים ל-train_model.py ול-ESP32)
 SAMPLING_RATE_HZ = 20
 DT = 1.0 / SAMPLING_RATE_HZ          # 0.05s (50ms)
 WINDOW_SECONDS = 2.0
@@ -70,7 +70,7 @@ def extract_single_window_features(win_array: np.ndarray) -> np.ndarray:
 def load_or_train_model():
     """
     טוען את המודל המאומן וה-Scaler מתוך minas_live_model.pkl.
-    אם הקובץ עדיין לא קיים, מריץ אוטומטית את train_biometric_model.py כדי לייצר אותו.
+    אם הקובץ עדיין לא קיים, מריץ אוטומטית את train_model.py כדי לייצר אותו.
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
@@ -117,7 +117,7 @@ def parse_forza_udp_packet(data: bytes):
     is_race_on = struct.unpack_from("<i", data, 0)[0] == 1
 
     if n >= 324:
-        # Forza Horizon (324 Bytes) - התאמה של 100% לבייטים של forza_telemetry_logger.py
+        # Forza Horizon (324 Bytes) - התאמה של 100% לבייטים של forza_logger.py
         raw_accel = data[315]
         raw_brake = data[316]
         raw_steer = struct.unpack_from("<b", data, 320)[0]

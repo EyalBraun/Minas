@@ -105,11 +105,12 @@ def record_telemetry():
             # יצירת שם קובץ דינמי
             filename = f"minas_{driver_name}_Track{track_name}_Run{run_num}.csv"
             
-            # יצירת תיקיית Data אם לא קיימת
-            if not os.path.exists("Data"):
-                os.makedirs("Data")
+            # יצירת תיקיית Data בתוך תיקיית poc אם לא קיימת
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            data_dir = os.path.join(script_dir, "Data")
+            os.makedirs(data_dir, exist_ok=True)
             
-            filepath = os.path.join("Data", filename)
+            filepath = os.path.join(data_dir, filename)
             df.to_csv(filepath, index=False)
             
             print("\n--- Final Recorded Telemetry Data (Preview) ---")
