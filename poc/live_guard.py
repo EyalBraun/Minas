@@ -25,7 +25,7 @@ except ImportError:
             return ""
     Fore = Back = Style = _Dummy()
 
-# קבועי דגימה וחלון זמן (זהים ל-train_model.py ול-ESP32)
+# קבועי דגימה וחלון זמן (זהים ל-train_model.py)
 SAMPLING_RATE_HZ = 20
 DT = 1.0 / SAMPLING_RATE_HZ          # 0.05s (50ms)
 WINDOW_SECONDS = 2.0
