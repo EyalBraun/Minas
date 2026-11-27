@@ -4,11 +4,10 @@ import joblib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
-from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.metrics import accuracy_score, confusion_matrix, roc_curve, auc
 
 # קביעת Seed לשחזור התוצאות
 np.random.seed(42)
@@ -224,6 +223,49 @@ def compute_rolling_probabilities(groups, probs, window=ROLLING_WINDOWS):
     return df_roll.groupby("group", sort=False)["prob"].transform(smooth_series).values
 
 
+def save_roc_and_threshold_curve(y_true, y_roll_probs, nn_res, script_dir):
+    """
+    מפיק גרף ROC נקי ופשוט עם סימון הסף האופטימלי בלבד.
+    """
+    fpr, tpr, _ = roc_curve(y_true, y_roll_probs)
+    roc_auc = auc(fpr, tpr)
+
+    locked_th = nn_res["th"]
+    locked_far = nn_res["far"] / 100.0
+    locked_tpr = 1.0 - (nn_res["frr"] / 100.0)
+
+    fig, ax = plt.subplots(figsize=(6.5, 5.5))
+
+    ax.plot([0, 1], [0, 1], color="#94a3b8", linestyle="--", linewidth=1.3)
+    ax.plot(fpr, tpr, color="#1d4ed8", linewidth=2.5, label=f"ROC Curve (AUC = {roc_auc:.3f})")
+    ax.scatter(
+        [locked_far],
+        [locked_tpr],
+        color="#dc2626",
+        s=70,
+        zorder=5,
+        label=f"Best Threshold = {locked_th:.2f}",
+    )
+
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_xlabel("False Positive Rate (FAR)", fontsize=11)
+    ax.set_ylabel("True Positive Rate (1 - FRR)", fontsize=11)
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.legend(loc="lower right", fontsize=10, frameon=True)
+
+    plt.tight_layout()
+
+    roc_path = os.path.join(script_dir, "forza_roc_curve.png")
+    try:
+        plt.savefig(roc_path, dpi=300)
+        print(f"[v] ROC curve saved successfully as '{roc_path}'")
+    except Exception as e:
+        print(f"[!] Could not save ROC graph to '{roc_path}': {e}")
+    finally:
+        plt.close(fig)
+
+
 def main():
     print("=" * 84)
     print("=== Minas Project: Real Forza Telemetry Training (Track A,B -> D) ===")
@@ -276,17 +318,7 @@ def main():
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # 4. אימון המודלים עם רגולריזציה למניעת Overfitting למסלולים A ו-B
-    rf_model = RandomForestClassifier(
-        n_estimators=200,
-        max_depth=5,
-        min_samples_leaf=4,
-        class_weight="balanced",
-        random_state=42,
-    )
-    rf_model.fit(X_train_scaled, y_train)
-
-    # אימון Tiny Neural Network עם רגולריזציית L2 (alpha=0.15) לשיפור ההכללה במסלול D
+    # 4. אימון Compact Neural Network עם רגולריזציית L2 (alpha=0.15) לשיפור ההכללה במסלול D
     nn_model = MLPClassifier(
         hidden_layer_sizes=(32, 16),
         alpha=0.15,
@@ -297,36 +329,21 @@ def main():
 
     # 5. חישוב הסתברויות Out-of-Fold (Cross-Validation) על נתוני האימון לכיול אמין של הסף
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    class_1_rf = list(rf_model.classes_).index(1)
     class_1_nn = list(nn_model.classes_).index(1)
-
-    p_tr_rf = cross_val_predict(rf_model, X_train_scaled, y_train, cv=cv, method="predict_proba")[:, class_1_rf]
-    p_te_rf = rf_model.predict_proba(X_test_scaled)[:, class_1_rf]
 
     p_tr_nn = cross_val_predict(nn_model, X_train_scaled, y_train, cv=cv, method="predict_proba")[:, class_1_nn]
     p_te_nn = nn_model.predict_proba(X_test_scaled)[:, class_1_nn]
 
-    model_prob_pairs = [
-        ("Random Forest", p_tr_rf, p_te_rf),
-        ("Tiny Neural Net", p_tr_nn, p_te_nn),
-    ]
-
-    results = {}
     print("\n" + "=" * 84)
     print(f"=== Blind Evaluation on Unseen Track {test_track} (Out-of-Fold Calibrated on {train_tracks}) ===")
     print("=" * 84)
     print(f"{'Model':<26} | {'Calibrated Th':<13} | {'Accuracy':<10} | {'FAR (<5%)':<10} | {'FRR (<10%)'}")
     print("-" * 84)
 
-    for name, p_tr, p_te in model_prob_pairs:
-        best_th = calibrate_optimal_threshold(y_train, p_tr)
-
-        y_pred_d = (p_te >= best_th).astype(int)
-        acc_d, far_d, frr_d = evaluate_security_metrics(y_test, y_pred_d)
-
-        results[name] = {"acc": acc_d, "far": far_d, "frr": frr_d, "th": best_th}
-        print(f"{name:<26} | {best_th:>13.2f} | {acc_d:>8.1f}% | {far_d:>8.1f}% | {frr_d:>8.1f}%")
-
+    single_th_nn = calibrate_optimal_threshold(y_train, p_tr_nn)
+    y_pred_d = (p_te_nn >= single_th_nn).astype(int)
+    acc_s, far_s, frr_s = evaluate_security_metrics(y_test, y_pred_d)
+    print(f"{'Neural Network (2.0s)':<26} | {single_th_nn:>13.2f} | {acc_s:>8.1f}% | {far_s:>8.1f}% | {frr_s:>8.1f}%")
     print("-" * 84)
 
     # 6. הערכה עיוורת ברמת שקלול רכב רציף (Rolling Consensus Buffer)
@@ -335,49 +352,59 @@ def main():
     print(f"{'Model':<26} | {'Calibrated Th':<13} | {'Accuracy':<10} | {'FAR (<5%)':<10} | {'FRR (<10%)'}")
     print("-" * 84)
 
-    rolling_results = {}
-    for name, p_tr, p_te in model_prob_pairs:
-        y_roll_tr = compute_rolling_probabilities(train_groups, p_tr, window=ROLLING_WINDOWS)
-        best_roll_th = calibrate_optimal_threshold(y_train, y_roll_tr)
+    y_roll_tr = compute_rolling_probabilities(train_groups, p_tr_nn, window=ROLLING_WINDOWS)
+    best_roll_th = calibrate_optimal_threshold(y_train, y_roll_tr)
 
-        y_roll_test = compute_rolling_probabilities(test_groups, p_te, window=ROLLING_WINDOWS)
-        pred_d = (y_roll_test >= best_roll_th).astype(int)
-        acc_d, far_d, frr_d = evaluate_security_metrics(y_test, pred_d)
+    y_roll_test = compute_rolling_probabilities(test_groups, p_te_nn, window=ROLLING_WINDOWS)
+    pred_d = (y_roll_test >= best_roll_th).astype(int)
+    acc_d, far_d, frr_d = evaluate_security_metrics(y_test, pred_d)
 
-        rolling_results[name] = {"acc": acc_d, "far": far_d, "frr": frr_d, "th": best_roll_th}
-        print(f"{name + ' (Roll)':<26} | {best_roll_th:>13.2f} | {acc_d:>8.1f}% | {far_d:>8.1f}% | {frr_d:>8.1f}%")
-
+    nn_res = {"acc": acc_d, "far": far_d, "frr": frr_d, "th": best_roll_th}
+    print(f"{'Neural Network (Roll)':<26} | {best_roll_th:>13.2f} | {acc_d:>8.1f}% | {far_d:>8.1f}% | {frr_d:>8.1f}%")
     print("-" * 84)
 
-    # 7. הפקת הגרף למצגת ולתיעוד הפרויקט
-    fig, ax = plt.subplots(figsize=(8.5, 5.5))
+    # 7a. הפקת גרף עמודות מסכם של מדדי האבטחה
+    fig, ax = plt.subplots(figsize=(8.0, 5.2))
 
     metrics_names = ["Accuracy (%)\n[Target > 90%]", "FAR (%)\n[Target < 5%]", "FRR (%)\n[Target < 10%]"]
-    rf_vals = [rolling_results["Random Forest"]["acc"], rolling_results["Random Forest"]["far"], rolling_results["Random Forest"]["frr"]]
-    nn_vals = [rolling_results["Tiny Neural Net"]["acc"], rolling_results["Tiny Neural Net"]["far"], rolling_results["Tiny Neural Net"]["frr"]]
+    nn_vals = [nn_res["acc"], nn_res["far"], nn_res["frr"]]
+    bar_colors = ["#0f766e", "#dc2626", "#2563eb"]
 
     x = np.arange(len(metrics_names))
-    width = 0.32
-    rects1 = ax.bar(x - width/2, rf_vals, width, label=f"Random Forest (Th={rolling_results['Random Forest']['th']:.2f})", color="#2b5c8f")
-    rects2 = ax.bar(x + width/2, nn_vals, width, label=f"Tiny Neural Net (Th={rolling_results['Tiny Neural Net']['th']:.2f})", color="#36a2eb")
+    rects = ax.bar(x, nn_vals, width=0.45, color=bar_colors, alpha=0.90,
+                   label=f"Neural Network (Locked Th={nn_res['th']:.2f})")
 
-    ax.set_ylabel("Percentage (%)", fontsize=11)
-    ax.set_title(f"Minas Security Metrics: Track {','.join(train_tracks)} -> Track {test_track}", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Percentage (%)", fontsize=11, fontweight="bold")
+    ax.set_title(
+        f"Minas Biometric Security Benchmarks: Track {','.join(train_tracks)} -> Track {test_track}",
+        fontsize=12,
+        fontweight="bold",
+    )
     ax.set_xticks(x)
-    ax.set_xticklabels(metrics_names, fontsize=10)
-    ax.set_ylim(0, 115)
+    ax.set_xticklabels(metrics_names, fontsize=10.5, fontweight="bold")
+    ax.set_ylim(0, 112)
     ax.grid(axis="y", linestyle="--", alpha=0.5)
 
     # קווי יעד (Targets) של הפרויקט
-    ax.axhline(y=90, xmin=0.01, xmax=0.33, color="red", linestyle=":", linewidth=2, label="Accuracy Target (>90%)")
-    ax.axhline(y=5, xmin=0.33, xmax=0.66, color="red", linestyle=":", linewidth=2, label="FAR Target (<5%)")
-    ax.axhline(y=10, xmin=0.66, xmax=0.99, color="red", linestyle=":", linewidth=2, label="FRR Target (<10%)")
-    ax.legend(fontsize=9, loc="upper right")
+    ax.axhline(y=90, xmin=0.04, xmax=0.30, color="#111827", linestyle="--", linewidth=2, label="Target Thresholds (>90% Acc, <5% FAR, <10% FRR)")
+    ax.axhline(y=5, xmin=0.37, xmax=0.63, color="#111827", linestyle="--", linewidth=2)
+    ax.axhline(y=10, xmin=0.70, xmax=0.96, color="#111827", linestyle="--", linewidth=2)
+    ax.legend(fontsize=9.5, loc="upper right")
 
-    for rect in list(rects1) + list(rects2):
+    target_vals = [90.0, 5.0, 10.0]
+    for rect, t_val in zip(rects, target_vals):
         h = rect.get_height()
-        ax.annotate(f"{h:.1f}%", xy=(rect.get_x() + rect.get_width()/2, h),
-                    xytext=(0, 3), textcoords="offset points", ha="center", va="bottom", fontsize=9, fontweight="bold")
+        label_y = max(h, t_val)
+        ax.annotate(
+            f"{h:.1f}%",
+            xy=(rect.get_x() + rect.get_width() / 2, label_y),
+            xytext=(0, 5),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            fontweight="bold",
+        )
 
     plt.tight_layout()
 
@@ -391,17 +418,17 @@ def main():
     finally:
         plt.close(fig)
 
+    # 7b. הפקת עקומת ROC פשוטה ונקייה
+    save_roc_and_threshold_curve(y_test, y_roll_test, nn_res, script_dir)
+
     auth_drivers = test_df[test_df["is_authorized"] == 1]["driver_name"].unique()
 
     # 8. ייצוא המודל, המנרמל (Scaler) והסף המכויל עבור מערכת הזיהוי בזמן אמת (Live PoC)
     model_bundle = {
         "nn_model": nn_model,
-        "rf_model": rf_model,
         "scaler": scaler,
-        "threshold_nn": float(rolling_results["Tiny Neural Net"]["th"]),
-        "threshold_rf": float(rolling_results["Random Forest"]["th"]),
-        "single_th_nn": float(results["Tiny Neural Net"]["th"]),
-        "single_th_rf": float(results["Random Forest"]["th"]),
+        "threshold_nn": float(nn_res["th"]),
+        "single_th_nn": float(single_th_nn),
         "window_size": WINDOW_SIZE,
         "stride_size": STRIDE_SIZE,
         "sampling_rate_hz": SAMPLING_RATE_HZ,

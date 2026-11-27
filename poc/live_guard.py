@@ -259,19 +259,14 @@ class MinasLiveEngine:
     """
     מנוע הזיהוי בזמן אמת (Circular Buffer של 40 דגימות + מונה התרעות רציף של 8 חלונות סמוכים).
     """
-    def __init__(self, bundle, use_gui=True, custom_threshold=None, model_type="nn"):
-        self.model_type = model_type.lower()
-        self.nn_model = bundle.get("nn_model")
-        self.rf_model = bundle.get("rf_model")
-        self.active_model = self.nn_model if self.model_type == "nn" else self.rf_model
+    def __init__(self, bundle, use_gui=True, custom_threshold=None):
+        self.nn_model = bundle["nn_model"]
+        self.active_model = self.nn_model
         self.scaler = bundle["scaler"]
         self.auth_driver = bundle.get("authorized_driver", "Eyal")
 
-        # סף החלטה מכויל עבור המודל הנבחר
-        if self.model_type == "nn":
-            default_th = float(bundle.get("threshold_nn", 0.45))
-        else:
-            default_th = float(bundle.get("threshold_rf", 0.46))
+        # סף החלטה מכויל עבור הרשת העצבית
+        default_th = float(bundle.get("threshold_nn", 0.46))
         self.threshold = custom_threshold if custom_threshold is not None else default_th
 
         self.buffer = deque(maxlen=WINDOW_SIZE)
@@ -354,7 +349,7 @@ class MinasLiveEngine:
             feats = extract_single_window_features(win_arr)
             feats_scaled = self.scaler.transform(feats)
 
-            # חישוב הסתברות ישירה מהמודל הנבחר (Tiny Neural Net כברירת מחדל או Random Forest)
+            # חישוב הסתברות ישירה מהרשת העצבית (Neural Network)
             class_idx = list(self.active_model.classes_).index(1)
             raw_prob = float(self.active_model.predict_proba(feats_scaled)[0, class_idx])
 
@@ -568,14 +563,13 @@ def main():
     parser.add_argument("--mode", choices=["forza", "demo"], default=None, help="'forza' for live UDP port 5000, 'demo' for live handover simulation")
     parser.add_argument("--ip", default="127.0.0.1", help="UDP bind IP for Forza Data Out (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=5000, help="UDP port for Forza Data Out (default: 5000)")
-    parser.add_argument("--threshold", type=float, default=None, help="Override decision threshold (e.g. 0.45)")
-    parser.add_argument("--model", choices=["nn", "rf"], default="nn", help="Biometric model to run: 'nn' (Tiny Neural Net, default) or 'rf' (Random Forest)")
+    parser.add_argument("--threshold", type=float, default=None, help="Override decision threshold (e.g. 0.46)")
     parser.add_argument("--no-gui", action="store_true", help="Disable floating Tkinter HUD window")
     parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier for demo mode (default: 1.0 = real-time)")
     args = parser.parse_args()
 
     bundle = load_or_train_model()
-    engine = MinasLiveEngine(bundle, use_gui=not args.no_gui, custom_threshold=args.threshold, model_type=args.model)
+    engine = MinasLiveEngine(bundle, use_gui=not args.no_gui, custom_threshold=args.threshold)
 
     mode = args.mode
     if mode is None:
